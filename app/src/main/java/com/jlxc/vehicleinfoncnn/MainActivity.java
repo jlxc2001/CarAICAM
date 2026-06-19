@@ -354,7 +354,7 @@ public class MainActivity extends ComponentActivity {
             List<Detection> list = new ArrayList<>();
             if (arr != null) {
                 for (Detection d : arr) {
-                    if (!vehicleOnly || isVehicleLabel(d.labelId)) list.add(d);
+                    if (!vehicleOnly || isRearRiskLabel(d.labelId)) list.add(d);
                 }
             }
             int bw = bitmap.getWidth();
@@ -384,21 +384,23 @@ public class MainActivity extends ComponentActivity {
         }
     }
 
-    private boolean isVehicleLabel(int labelId) {
-        // COCO: 1 bicycle, 2 car, 3 motorcycle, 5 bus, 7 truck
-        return labelId == 1 || labelId == 2 || labelId == 3 || labelId == 5 || labelId == 7;
+    private boolean isRearRiskLabel(int labelId) {
+        // COCO safety-first rear blind-spot classes:
+        // 0 person, 1 bicycle, 2 car, 3 motorcycle, 5 bus, 7 truck.
+        // 为了并线安全，人也纳入风险目标；只要疑似人/车出现在左右风险区，就触发红框和状态上报。
+        return labelId == 0 || labelId == 1 || labelId == 2 || labelId == 3 || labelId == 5 || labelId == 7;
     }
 
 
     private void evaluateRearRisk(List<Detection> list, int imageW, int imageH) {
         boolean left = false;
         boolean right = false;
-        float minArea = 0.0045f; // 太小的远处目标先不作为转向阻挡，避免误报。
         if (list != null) {
             for (Detection d : list) {
-                if (d == null || !isVehicleLabel(d.labelId)) continue;
-                if (d.confidence < Math.max(0.18f, confThreshold * 0.80f)) continue;
-                if (d.areaRatio < minArea) continue;
+                if (d == null || !isRearRiskLabel(d.labelId)) continue;
+                // Safety-first mode: no extra confidence or area gate here.
+                // The detector's own threshold still controls what enters the detection list,
+                // but risk evaluation does not apply a second, stricter filter.
                 float cx = (d.x + d.width * 0.5f) / Math.max(1f, imageW);
                 if (cx <= leftRiskLine) left = true;
                 if (cx >= rightRiskLine) right = true;
@@ -623,7 +625,7 @@ public class MainActivity extends ComponentActivity {
 
         Switch labels = sw("10 // 显示目标标签", showLabels);
         Switch reticle = sw("11 // 显示火控准星", showReticle);
-        Switch onlyVehicles = sw("12 // 只显示交通工具", vehicleOnly);
+        Switch onlyVehicles = sw("12 // 只显示人/交通风险目标", vehicleOnly);
         Switch gpu = sw("13 // 尝试 GPU / Vulkan", useGpu);
         panel.addView(labels);
         panel.addView(reticle);
