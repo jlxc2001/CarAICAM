@@ -24,8 +24,14 @@ android {
     }
 
     buildTypes {
-        debug { debuggable true }
+        debug {
+            debuggable true
+        }
         release {
+            // 方便直接测试：release 版用系统默认 debug keystore 签名。
+            // 这样 GitHub Actions 产出的 app-release.apk 可以直接 adb install。
+            // 正式上架时请换成你自己的 release keystore。
+            signingConfig signingConfigs.debug
             minifyEnabled false
             shrinkResources false
         }

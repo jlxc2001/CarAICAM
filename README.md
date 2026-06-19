@@ -38,13 +38,14 @@ VehicleInfoNcnn/
 2. 把本工程所有文件上传到仓库根目录。
 3. 打开仓库的 **Actions**。
 4. 运行 **Android APK** 工作流。
-5. 编译完成后，在 Artifact 里下载 `VehicleInfoNcnn-release-apk`。
+5. 编译完成后，在 Artifact 里下载 `VehicleInfoNcnn-installable-apks`。
+6. 优先安装 `VehicleInfoNcnn-debug-installable.apk`；也可以安装 `VehicleInfoNcnn-release-debugSigned-installable.apk`。不要安装 `app-release-unsigned.apk`。
 
 工作流会自动执行：
 
 ```bash
 bash scripts/setup_deps.sh
-gradle assembleRelease --stacktrace --no-daemon
+gradle assembleDebug assembleRelease --stacktrace --no-daemon
 ```
 
 其中 `setup_deps.sh` 会把以下内容下载到工程内：
@@ -113,3 +114,47 @@ detectorReady = detector.init(getAssets(), false, 640);
 3. **车身颜色识别**：在检测框区域内加入颜色聚类或训练颜色分类器。
 4. **车机录屏/USB 摄像头输入**：把 CameraX 输入替换成录屏帧或 UVC 摄像头帧。
 5. **悬浮窗识别框**：如果用于车机倒车画面，可以把 OverlayView 改成系统悬浮窗。
+
+
+## 安装失败排查
+
+如果你看到：
+
+```text
+ERROR: "adb install" returned with value 1
+Failed to install ... app-release-unsigned.apk
+```
+
+原因通常是你安装了未签名的 release 包。Android 必须安装已签名 APK。
+
+这版工作流会产出两个可安装文件：
+
+```text
+VehicleInfoNcnn-debug-installable.apk
+VehicleInfoNcnn-release-debugSigned-installable.apk
+```
+
+推荐命令：
+
+```bat
+adb install -r VehicleInfoNcnn-debug-installable.apk
+```
+
+如果你之前装过旧版本但签名不同，先卸载旧包：
+
+```bat
+adb uninstall com.jlxc.vehicleinfoncnn
+adb install -r VehicleInfoNcnn-debug-installable.apk
+```
+
+如果仍然失败，请用下面命令拿到真正失败原因：
+
+```bat
+adb install -r -d VehicleInfoNcnn-debug-installable.apk
+```
+
+常见原因：
+
+- `INSTALL_FAILED_UPDATE_INCOMPATIBLE`：旧版本签名不同，先 `adb uninstall com.jlxc.vehicleinfoncnn`。
+- `INSTALL_FAILED_NO_MATCHING_ABIS`：手机 CPU 架构不匹配；本工程默认支持 `armeabi-v7a` 和 `arm64-v8a`。
+- `INSTALL_FAILED_OLDER_SDK`：系统版本低于 Android 6.0；本工程 `minSdk 23`。
