@@ -1,66 +1,67 @@
-# VehicleInfoNcnn v5 compat
+# VehicleInfoNcnn Rear AI v6
 
-基于 ncnn + YOLOv8n NCNN 的安卓实时目标识别 Demo。该版本在 v4.1 safe 的基础上重点增强多设备相机兼容性，继续保留荧光绿战斗机 HUD 风格。
+ncnn + YOLOv8n 的安卓后置 AI 视觉节点版本。适合把一台安卓手机安装在车辆后方，实时拍摄后视画面，并把 AI 识别结果和左右侧风险状态通过局域网传给车机桌面（例如 MikuCarLauncher）。
 
-## v5 主要更新
+## 核心功能
 
-- 新增多摄兼容策略：CameraX 绑定失败会按 `指定 Camera ID -> 默认后摄 -> 默认前摄` 自动降级。
-- 新增广角倍率模式：`OFF/1.0x`、`0.6x`、`0.7x`、`0.8x`。
-- Android 11+ 会尝试通过 Camera2 `CONTROL_ZOOM_RATIO` 设置 0.6x/0.7x/0.8x，适配“系统相机通过 0.6x 触发超广角”的手机。
-- 新增相机分析分辨率：`640x480`、`960x540`、`1280x720`、`AUTO`。
-- 新增兼容预览模式开关：老机、魔改系统、多摄异常时建议打开。
-- 启动默认仍使用 AUTO 默认后摄，避免隐藏物理镜头导致闪退。
-- 保留设置中的 Camera ID 列表，可手动尝试 CAM-4 这类隐藏/辅助镜头。
-- 保留全屏沉浸式、隐藏状态栏和虚拟键。
-- 保留全类别识别、交通工具过滤、GPU/Vulkan 开关、HUD Overlay。
+- CameraX 实时预览与 ncnn YOLOv8n 推理
+- 默认 1280×720 相机分析分辨率，适配 2560×720 车机半屏显示
+- 荧光绿战斗机 HUD 风格识别框
+- 左右侧风险判断：只用交通相关类别参与“是否有车”判断
+- 左/右侧有车时，手机屏幕和 MJPEG 画面都会叠加红色警告框
+- 设置里可进入“风险阈值线编辑”，直接拖动两条竖线调整左/右侧判定范围
+- UDP 控制/状态 + HTTP MJPEG 视频流
+- 多摄兼容：AUTO、指定 Camera ID、0.6x/0.7x/0.8x 广角倍率
 
-## 针对你这台设备的建议
+## 端口与协议
 
-根据你导出的 `media_camera_dump.txt`，系统相机广角状态显示：
+手机端启动后会监听：
 
-- Camera ID: 4
-- zoomRatio: 0.6
-- focalLength: 1.65mm
+- UDP 控制端口：`47210`
+- HTTP/MJPEG 端口：`47211`
 
-因此 v5 推荐先这样测试：
+HTTP 地址：
 
-1. 摄像头选择：`AUTO DEFAULT BACK`
-2. 广角倍率：`0.6x`
-3. 相机分析分辨率：`960x540` 或 `1280x720`
-4. 兼容预览模式：先打开
+- `/stream`：MJPEG 视频流，固定 1280×720
+- `/snapshot.jpg`：当前快照
+- `/status`：当前 JSON 状态
 
-如果 AUTO + 0.6x 没有广角效果，再试：
+UDP 指令：
 
-1. 摄像头选择：`CAM-4`
-2. 广角倍率：`OFF/1.0x` 或 `0.6x`
-3. 如果黑屏/失败，会自动回退默认后摄
+- `TURN_LEFT`
+- `TURN_RIGHT`
+- `TURN_OFF`
+- `STREAM_ON`
+- `STREAM_OFF`
+- `PING`
 
-## 构建
+状态码：
 
-上传到 GitHub 后运行 Actions：
+- `0`：左右两侧都有车
+- `1`：左侧有车
+- `2`：右侧有车
+- `3`：两侧安全/未检测到风险
 
-- Workflow: `Android APK`
-- 下载 artifact: `VehicleInfoNcnn-installable-apks`
-- 优先安装：`VehicleInfoNcnn-debug-installable.apk`
+## GitHub Actions 打包
+
+上传到 GitHub 后运行 Actions，下载 `VehicleInfoNcnn-installable-apks`，优先安装：
 
 ```bat
 adb install -r VehicleInfoNcnn-debug-installable.apk
 ```
 
-签名冲突：
+如果签名冲突：
 
 ```bat
 adb uninstall com.jlxc.vehicleinfoncnn
 adb install -r VehicleInfoNcnn-debug-installable.apk
 ```
 
-## 日志
+## 依赖下载
 
-如果某个相机模式黑屏或崩溃，导出：
+Actions 会自动下载：
 
-```bat
-adb logcat -c
-adb shell am start -n com.jlxc.vehicleinfoncnn/.MainActivity
-adb logcat -d -v threadtime > vehicle_ncnn_v5_log.txt
-adb shell dumpsys media.camera > media_camera_dump.txt
-```
+- ncnn Android 预编译库
+- `yolov8n.ncnn.bin` 模型权重
+
+`assets` 中已经保留 `yolov8n.ncnn.param` 和模型说明。

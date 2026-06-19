@@ -8,6 +8,7 @@ import android.graphics.Typeface;
 import android.os.SystemClock;
 import android.util.AttributeSet;
 import android.view.View;
+import android.view.MotionEvent;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -17,6 +18,7 @@ public class OverlayView extends View {
     private static final int HUD_GREEN = 0xff39ff14;
     private static final int HUD_GREEN_SOFT = 0xffa8ff9c;
     private static final int HUD_GREEN_DIM = 0x6639ff14;
+    private static final int ALERT_RED = 0xffff2020;
 
     private final Paint framePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint cornerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -28,6 +30,9 @@ public class OverlayView extends View {
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint smallTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint monoPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint alertPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint alertFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint riskLinePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final List<Detection> detections = new ArrayList<>();
 
     private Typeface hudTypeface;
@@ -35,6 +40,17 @@ public class OverlayView extends View {
     private int imageHeight = 1;
     private boolean showLabels = true;
     private boolean showCenterReticle = true;
+    private float leftRiskLine = 0.45f;
+    private float rightRiskLine = 0.55f;
+    private boolean leftDanger = false;
+    private boolean rightDanger = false;
+    private boolean riskLineEditMode = false;
+    private int activeDragLine = 0; // 1=left, 2=right
+    private RiskLineChangeListener riskLineChangeListener;
+
+    public interface RiskLineChangeListener {
+        void onRiskLinesChanged(float leftLine, float rightLine);
+    }
 
     public OverlayView(Context context) {
         super(context);
@@ -101,12 +117,53 @@ public class OverlayView extends View {
         monoPaint.setTextSize(10f * d);
         monoPaint.setLetterSpacing(0.04f);
         monoPaint.setSubpixelText(true);
+
+        alertPaint.setStyle(Paint.Style.STROKE);
+        alertPaint.setStrokeWidth(3.2f * d);
+        alertPaint.setColor(ALERT_RED);
+        alertPaint.setStrokeCap(Paint.Cap.SQUARE);
+
+        alertFillPaint.setStyle(Paint.Style.FILL);
+        alertFillPaint.setColor(0x24ff0000);
+
+        riskLinePaint.setStyle(Paint.Style.STROKE);
+        riskLinePaint.setStrokeWidth(2.0f * d);
+        riskLinePaint.setColor(0xcc39ff14);
+        riskLinePaint.setStrokeCap(Paint.Cap.SQUARE);
     }
 
     public synchronized void setRenderOptions(boolean labels, boolean centerReticle) {
         showLabels = labels;
         showCenterReticle = centerReticle;
         postInvalidate();
+    }
+
+
+
+    public synchronized void setRiskState(boolean left, boolean right, float leftLine, float rightLine) {
+        leftDanger = left;
+        rightDanger = right;
+        leftRiskLine = clamp(leftLine, 0.05f, 0.95f);
+        rightRiskLine = clamp(rightLine, leftRiskLine + 0.03f, 0.98f);
+        postInvalidate();
+    }
+
+    public synchronized void setRiskLineEditMode(boolean enabled) {
+        riskLineEditMode = enabled;
+        activeDragLine = 0;
+        postInvalidate();
+    }
+
+    public synchronized boolean isRiskLineEditMode() {
+        return riskLineEditMode;
+    }
+
+    public synchronized void setRiskLineChangeListener(RiskLineChangeListener listener) {
+        riskLineChangeListener = listener;
+    }
+
+    private static float clamp(float v, float min, float max) {
+        return Math.max(min, Math.min(max, v));
     }
 
     public synchronized void setDetections(List<Detection> result, int width, int height) {
@@ -127,6 +184,7 @@ public class OverlayView extends View {
         float pulse = 0.55f + 0.45f * (float) Math.sin(now / 185.0);
 
         drawGlobalHud(canvas, viewW, viewH, d, pulse);
+        drawRiskOverlay(canvas, viewW, viewH, d, pulse);
 
         if (!detections.isEmpty()) {
             float scale = Math.max(viewW / imageWidth, viewH / imageHeight);
@@ -146,6 +204,106 @@ public class OverlayView extends View {
 
         // Keep the avionics HUD alive, but avoid wasting too much CPU on old phones.
         postInvalidateDelayed(85);
+    }
+
+
+    @Override
+    public synchronized boolean onTouchEvent(MotionEvent event) {
+        if (!riskLineEditMode) return super.onTouchEvent(event);
+        float w = Math.max(1f, getWidth());
+        float x = event.getX();
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN: {
+                float lx = leftRiskLine * w;
+                float rx = rightRiskLine * w;
+                activeDragLine = Math.abs(x - lx) <= Math.abs(x - rx) ? 1 : 2;
+                updateDraggedLine(x / w, false);
+                return true;
+            }
+            case MotionEvent.ACTION_MOVE:
+                updateDraggedLine(x / w, false);
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                updateDraggedLine(x / w, true);
+                activeDragLine = 0;
+                return true;
+        }
+        return true;
+    }
+
+    private void updateDraggedLine(float ratio, boolean commit) {
+        ratio = clamp(ratio, 0.08f, 0.92f);
+        if (activeDragLine == 1) {
+            leftRiskLine = clamp(ratio, 0.08f, rightRiskLine - 0.05f);
+        } else if (activeDragLine == 2) {
+            rightRiskLine = clamp(ratio, leftRiskLine + 0.05f, 0.92f);
+        }
+        if (commit && riskLineChangeListener != null) {
+            riskLineChangeListener.onRiskLinesChanged(leftRiskLine, rightRiskLine);
+        }
+        postInvalidate();
+    }
+
+    private void drawRiskOverlay(Canvas canvas, float w, float h, float d, float pulse) {
+        float lx = leftRiskLine * w;
+        float rx = rightRiskLine * w;
+        if (leftDanger) drawAlertFrame(canvas, new RectF(0, 0, lx, h), "LEFT BLOCKED", d, pulse);
+        if (rightDanger) drawAlertFrame(canvas, new RectF(rx, 0, w, h), "RIGHT BLOCKED", d, pulse);
+
+        int oldAlpha = riskLinePaint.getAlpha();
+        riskLinePaint.setAlpha(riskLineEditMode ? 245 : 90);
+        canvas.drawLine(lx, 0, lx, h, riskLinePaint);
+        canvas.drawLine(rx, 0, rx, h, riskLinePaint);
+        smallTextPaint.setAlpha(riskLineEditMode ? 245 : 95);
+        smallTextPaint.setColor(riskLineEditMode ? HUD_GREEN_SOFT : HUD_GREEN);
+        canvas.drawText("LEFT THR", lx + 7f * d, h - 26f * d, smallTextPaint);
+        canvas.drawText("RIGHT THR", rx + 7f * d, h - 26f * d, smallTextPaint);
+
+        if (riskLineEditMode) {
+            panelPaint.setColor(0xd0001000);
+            RectF tip = new RectF(18f * d, h - 82f * d, Math.min(w - 18f * d, 610f * d), h - 36f * d);
+            canvas.drawRect(tip, panelPaint);
+            framePaint.setAlpha(200);
+            canvas.drawRect(tip, framePaint);
+            textPaint.setAlpha(245);
+            textPaint.setColor(HUD_GREEN_SOFT);
+            textPaint.setTextSize(12f * d);
+            canvas.drawText("DRAG L/R THRESHOLD LINES // LONG PRESS SETTINGS TO EXIT", tip.left + 12f * d, tip.top + 29f * d, textPaint);
+            drawLineHandle(canvas, lx, h * 0.5f, d, activeDragLine == 1);
+            drawLineHandle(canvas, rx, h * 0.5f, d, activeDragLine == 2);
+        }
+        riskLinePaint.setAlpha(oldAlpha);
+    }
+
+    private void drawLineHandle(Canvas canvas, float x, float y, float d, boolean active) {
+        Paint p = active ? cornerPaint : framePaint;
+        int old = p.getAlpha();
+        p.setAlpha(active ? 255 : 180);
+        float s = 18f * d;
+        canvas.drawLine(x - s, y, x + s, y, p);
+        canvas.drawLine(x, y - s, x, y + s, p);
+        canvas.drawRect(x - 8f * d, y - 8f * d, x + 8f * d, y + 8f * d, p);
+        p.setAlpha(old);
+    }
+
+    private void drawAlertFrame(Canvas canvas, RectF r, String label, float d, float pulse) {
+        canvas.drawRect(r, alertFillPaint);
+        int oldAlpha = alertPaint.getAlpha();
+        alertPaint.setAlpha((int) (185 + 60 * pulse));
+        alertPaint.setStrokeWidth(5.2f * d);
+        canvas.drawRect(r.left + 5f * d, r.top + 5f * d, r.right - 5f * d, r.bottom - 5f * d, alertPaint);
+        alertPaint.setStrokeWidth(1.5f * d);
+        alertPaint.setAlpha(120);
+        for (float y = 24f * d; y < r.bottom; y += 30f * d) {
+            canvas.drawLine(r.left + 12f * d, y, r.right - 12f * d, y, alertPaint);
+        }
+        textPaint.setColor(ALERT_RED);
+        textPaint.setAlpha(245);
+        textPaint.setTextSize(14f * d);
+        canvas.drawText(label, r.left + 26f * d, 76f * d, textPaint);
+        textPaint.setColor(HUD_GREEN_SOFT);
+        alertPaint.setAlpha(oldAlpha);
     }
 
     private void drawGlobalHud(Canvas canvas, float w, float h, float d, float pulse) {

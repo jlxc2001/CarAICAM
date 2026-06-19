@@ -63,6 +63,10 @@ import java.util.Arrays;
 import android.view.WindowManager;
 import java.util.Locale;
 import java.util.List;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.util.Collections;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -82,6 +86,10 @@ public class MainActivity extends ComponentActivity {
     private static final String KEY_WIDE_ZOOM = "wide_zoom";
     private static final String KEY_COMPAT_PREVIEW = "compat_preview";
     private static final String KEY_ANALYSIS_SIZE = "analysis_size";
+    private static final String KEY_LEFT_RISK_LINE = "left_risk_line";
+    private static final String KEY_RIGHT_RISK_LINE = "right_risk_line";
+    private static final int UDP_COMMAND_PORT = 47210;
+    private static final int HTTP_MJPEG_PORT = 47211;
 
     private PreviewView previewView;
     private OverlayView overlayView;
@@ -93,7 +101,7 @@ public class MainActivity extends ComponentActivity {
     private volatile float nmsThreshold = 0.45f;
     private volatile int maxResults = 40;
     private volatile int inputSize = 320;
-    private volatile int inferIntervalMs = 180;
+    private volatile int inferIntervalMs = 120;
     private volatile boolean showLabels = true;
     private volatile boolean showReticle = true;
     private volatile boolean vehicleOnly = false;
@@ -101,8 +109,16 @@ public class MainActivity extends ComponentActivity {
     private volatile String selectedCameraId = "";
     private volatile float wideZoomRatio = 1.0f;
     private volatile boolean compatPreview = true;
-    private volatile int analysisSizeMode = 0; // 0=640x480, 1=960x540, 2=1280x720, 3=CameraX auto
+    private volatile int analysisSizeMode = 2; // 0=640x480, 1=960x540, 2=1280x720, 3=CameraX auto
+    private volatile float leftRiskLine = 0.45f;
+    private volatile float rightRiskLine = 0.55f;
+    private volatile boolean leftDanger = false;
+    private volatile boolean rightDanger = false;
+    private volatile int dangerStatus = 3; // 0=both, 1=left, 2=right, 3=clear
+    private volatile String activeTurn = "NONE";
     private volatile Camera boundCamera;
+    private RearVisionBridge rearBridge;
+    private StreamFrameRenderer streamFrameRenderer;
     private long lastInferMs = 0L;
     private long lastErrorToastMs = 0L;
 
@@ -113,6 +129,10 @@ public class MainActivity extends ComponentActivity {
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         loadSettings();
         buildUi();
+
+        streamFrameRenderer = new StreamFrameRenderer(getAssets());
+        rearBridge = new RearVisionBridge(UDP_COMMAND_PORT, HTTP_MJPEG_PORT, this::handleRearCommand);
+        rearBridge.start();
 
         cameraExecutor = Executors.newSingleThreadExecutor();
         detector = new VehicleDetector();
@@ -135,6 +155,7 @@ public class MainActivity extends ComponentActivity {
         root.setBackgroundColor(0xff000000);
         root.setLongClickable(true);
         root.setOnLongClickListener(v -> {
+            if (overlayView != null) overlayView.setRiskLineEditMode(false);
             showSettingsDialog();
             return true;
         });
@@ -144,14 +165,24 @@ public class MainActivity extends ComponentActivity {
         previewView.setImplementationMode(compatPreview ? PreviewView.ImplementationMode.COMPATIBLE : PreviewView.ImplementationMode.PERFORMANCE);
         previewView.setLongClickable(true);
         previewView.setOnLongClickListener(v -> {
+            if (overlayView != null) overlayView.setRiskLineEditMode(false);
             showSettingsDialog();
             return true;
         });
 
         overlayView = new OverlayView(this);
         overlayView.setRenderOptions(showLabels, showReticle);
+        overlayView.setRiskState(leftDanger, rightDanger, leftRiskLine, rightRiskLine);
+        overlayView.setRiskLineChangeListener((leftLine, rightLine) -> {
+            leftRiskLine = leftLine;
+            rightRiskLine = rightLine;
+            saveSettings();
+            if (rearBridge != null) rearBridge.updateStatus(buildRearStatusJson());
+            Toast.makeText(this, "左右风险阈值线已保存", Toast.LENGTH_SHORT).show();
+        });
         overlayView.setLongClickable(true);
         overlayView.setOnLongClickListener(v -> {
+            if (overlayView != null) overlayView.setRiskLineEditMode(false);
             showSettingsDialog();
             return true;
         });
@@ -163,7 +194,7 @@ public class MainActivity extends ComponentActivity {
         setContentView(root);
         enterImmersiveMode();
 
-        Toast.makeText(this, "长按屏幕打开识别设置", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "长按设置；局域网后视节点已启动", Toast.LENGTH_SHORT).show();
     }
 
     private void startCamera() {
@@ -328,7 +359,20 @@ public class MainActivity extends ComponentActivity {
             }
             int bw = bitmap.getWidth();
             int bh = bitmap.getHeight();
-            runOnUiThread(() -> overlayView.setDetections(list, bw, bh));
+            evaluateRearRisk(list, bw, bh);
+            String statusJson = buildRearStatusJson();
+            if (rearBridge != null) {
+                rearBridge.updateStatus(statusJson);
+                try {
+                    byte[] frame = streamFrameRenderer.render(bitmap, list, leftRiskLine, rightRiskLine,
+                            leftDanger, rightDanger, dangerStatus, activeTurn, showLabels);
+                    rearBridge.updateFrame(frame);
+                } catch (Throwable ignored) { }
+            }
+            runOnUiThread(() -> {
+                overlayView.setDetections(list, bw, bh);
+                overlayView.setRiskState(leftDanger, rightDanger, leftRiskLine, rightRiskLine);
+            });
         } catch (Throwable t) {
             long tNow = System.currentTimeMillis();
             if (tNow - lastErrorToastMs > 2500) {
@@ -343,6 +387,79 @@ public class MainActivity extends ComponentActivity {
     private boolean isVehicleLabel(int labelId) {
         // COCO: 1 bicycle, 2 car, 3 motorcycle, 5 bus, 7 truck
         return labelId == 1 || labelId == 2 || labelId == 3 || labelId == 5 || labelId == 7;
+    }
+
+
+    private void evaluateRearRisk(List<Detection> list, int imageW, int imageH) {
+        boolean left = false;
+        boolean right = false;
+        float minArea = 0.0045f; // 太小的远处目标先不作为转向阻挡，避免误报。
+        if (list != null) {
+            for (Detection d : list) {
+                if (d == null || !isVehicleLabel(d.labelId)) continue;
+                if (d.confidence < Math.max(0.18f, confThreshold * 0.80f)) continue;
+                if (d.areaRatio < minArea) continue;
+                float cx = (d.x + d.width * 0.5f) / Math.max(1f, imageW);
+                if (cx <= leftRiskLine) left = true;
+                if (cx >= rightRiskLine) right = true;
+            }
+        }
+        leftDanger = left;
+        rightDanger = right;
+        if (left && right) dangerStatus = 0;
+        else if (left) dangerStatus = 1;
+        else if (right) dangerStatus = 2;
+        else dangerStatus = 3; // 3=clear；用户定义的 0/1/2 保留给有风险状态。
+    }
+
+    private void handleRearCommand(String commandText, InetAddress address, int port) {
+        if (commandText == null) return;
+        String up = commandText.trim().toUpperCase(Locale.US);
+        if (up.contains("TURN_LEFT") || up.equals("LEFT") || up.contains("MIKU_LEFT")) {
+            activeTurn = "LEFT";
+            if (rearBridge != null) rearBridge.enableStreamFor(15000);
+        } else if (up.contains("TURN_RIGHT") || up.equals("RIGHT") || up.contains("MIKU_RIGHT")) {
+            activeTurn = "RIGHT";
+            if (rearBridge != null) rearBridge.enableStreamFor(15000);
+        } else if (up.contains("TURN_OFF") || up.contains("CANCEL") || up.contains("STREAM_OFF") || up.contains("NONE")) {
+            activeTurn = "NONE";
+            if (rearBridge != null && up.contains("STREAM_OFF")) rearBridge.disableStream();
+        } else if (up.contains("STREAM_ON") || up.contains("PING")) {
+            if (rearBridge != null) rearBridge.enableStreamFor(15000);
+        }
+        if (rearBridge != null) rearBridge.updateStatus(buildRearStatusJson());
+    }
+
+    private String buildRearStatusJson() {
+        String ip = getLocalIpAddress();
+        return String.format(Locale.US,
+                "{\"type\":\"miku_rear_ai\",\"status\":%d,\"left\":%s,\"right\":%s,\"turn\":\"%s\",\"stream\":\"http://%s:%d/stream\",\"snapshot\":\"http://%s:%d/snapshot.jpg\",\"leftLine\":%.3f,\"rightLine\":%.3f,\"ts\":%d}",
+                dangerStatus,
+                leftDanger ? "true" : "false",
+                rightDanger ? "true" : "false",
+                activeTurn == null ? "NONE" : activeTurn,
+                ip, HTTP_MJPEG_PORT,
+                ip, HTTP_MJPEG_PORT,
+                leftRiskLine,
+                rightRiskLine,
+                System.currentTimeMillis());
+    }
+
+    private String getLocalIpAddress() {
+        try {
+            List<NetworkInterface> interfaces = Collections.list(NetworkInterface.getNetworkInterfaces());
+            for (NetworkInterface nif : interfaces) {
+                if (!nif.isUp() || nif.isLoopback()) continue;
+                List<InetAddress> addrs = Collections.list(nif.getInetAddresses());
+                for (InetAddress addr : addrs) {
+                    if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {
+                        String ip = addr.getHostAddress();
+                        if (ip != null && !ip.startsWith("127.")) return ip;
+                    }
+                }
+            }
+        } catch (Throwable ignored) { }
+        return "0.0.0.0";
     }
 
     private void showSettingsDialog() {
@@ -391,7 +508,7 @@ public class MainActivity extends ComponentActivity {
         panel.addView(sub);
 
         TextView hint = new TextView(this);
-        hint.setText("默认显示 YOLOv8 COCO 全类别；启动后强制全屏隐藏状态栏/虚拟键。多摄手机建议优先用 AUTO + 0.6x 广角倍率；如果不生效，再手动尝试 CAM-ID。保存后立即应用。 ");
+        hint.setText("默认显示 YOLOv8 COCO 全类别；后视联动建议 1280x720 分析分辨率。多摄手机优先用 AUTO + 0.6x 广角倍率；车机端通过 UDP 指令触发，HTTP MJPEG 拉取 1280x720 画面。保存后立即应用。 ");
         hint.setTextSize(13.5f);
         hint.setTextColor(0xff8dff82);
         hint.setLineSpacing(0, 1.15f);
@@ -519,6 +636,36 @@ public class MainActivity extends ComponentActivity {
         gpuHint.setTextColor(0x9939ff14);
         gpuHint.setPadding(0, dp(5), 0, dp(12));
         panel.addView(gpuHint);
+
+        TextView rearTitle = sectionTitle("14 // 后视联动 / 局域网输出");
+        panel.addView(rearTitle);
+        TextView rearInfo = new TextView(this);
+        String ip = getLocalIpAddress();
+        rearInfo.setText("UDP 控制端口：" + UDP_COMMAND_PORT
+                + "\nHTTP/MJPEG： http://" + ip + ":" + HTTP_MJPEG_PORT + "/stream"
+                + "\n状态 JSON： http://" + ip + ":" + HTTP_MJPEG_PORT + "/status"
+                + "\n状态码：0=左右都有车，1=左侧有车，2=右侧有车，3=两侧安全/未检测到风险。车机端收到转向后可显示 1280x720 视频流，占 2560x720 屏幕一半。");
+        rearInfo.setTextSize(12.2f);
+        rearInfo.setTextColor(0xff8dff82);
+        rearInfo.setLineSpacing(0, 1.15f);
+        rearInfo.setPadding(0, dp(2), 0, dp(8));
+        panel.addView(rearInfo);
+
+        TextView lineInfo = new TextView(this);
+        lineInfo.setText(String.format(Locale.US, "左右风险阈值线：LEFT %.0f%% / RIGHT %.0f%%。点击下面按钮后，直接在预览画面拖动两条竖线保存。", leftRiskLine * 100f, rightRiskLine * 100f));
+        lineInfo.setTextSize(12.2f);
+        lineInfo.setTextColor(0x9939ff14);
+        lineInfo.setPadding(0, 0, 0, dp(8));
+        panel.addView(lineInfo);
+
+        Button editLines = tacticalButton("EDIT RISK LINES", hudTypeface);
+        editLines.setOnClickListener(v -> {
+            overlayView.setRiskLineEditMode(true);
+            dialog.dismiss();
+            enterImmersiveMode();
+            Toast.makeText(this, "拖动两条竖线调整左右侧有车判定范围", Toast.LENGTH_LONG).show();
+        });
+        panel.addView(editLines);
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -792,7 +939,7 @@ public class MainActivity extends ComponentActivity {
         nmsThreshold = prefs.getFloat(KEY_NMS, 0.45f);
         maxResults = prefs.getInt(KEY_MAX, 40);
         inputSize = prefs.getInt(KEY_INPUT, 320);
-        inferIntervalMs = prefs.getInt(KEY_INTERVAL, 180);
+        inferIntervalMs = prefs.getInt(KEY_INTERVAL, 120);
         showLabels = prefs.getBoolean(KEY_LABELS, true);
         showReticle = prefs.getBoolean(KEY_RETICLE, true);
         vehicleOnly = prefs.getBoolean(KEY_VEHICLE_ONLY, false);
@@ -800,7 +947,9 @@ public class MainActivity extends ComponentActivity {
         selectedCameraId = prefs.getString(KEY_CAMERA_ID, "");
         wideZoomRatio = prefs.getFloat(KEY_WIDE_ZOOM, 1.0f);
         compatPreview = prefs.getBoolean(KEY_COMPAT_PREVIEW, true);
-        analysisSizeMode = prefs.getInt(KEY_ANALYSIS_SIZE, 0);
+        analysisSizeMode = prefs.getInt(KEY_ANALYSIS_SIZE, 2);
+        leftRiskLine = prefs.getFloat(KEY_LEFT_RISK_LINE, 0.45f);
+        rightRiskLine = prefs.getFloat(KEY_RIGHT_RISK_LINE, 0.55f);
     }
 
     private void saveSettings() {
@@ -818,6 +967,8 @@ public class MainActivity extends ComponentActivity {
                 .putFloat(KEY_WIDE_ZOOM, wideZoomRatio)
                 .putBoolean(KEY_COMPAT_PREVIEW, compatPreview)
                 .putInt(KEY_ANALYSIS_SIZE, analysisSizeMode)
+                .putFloat(KEY_LEFT_RISK_LINE, leftRiskLine)
+                .putFloat(KEY_RIGHT_RISK_LINE, rightRiskLine)
                 .apply();
     }
 
@@ -826,7 +977,7 @@ public class MainActivity extends ComponentActivity {
         nmsThreshold = 0.45f;
         maxResults = 40;
         inputSize = 320;
-        inferIntervalMs = 180;
+        inferIntervalMs = 120;
         showLabels = true;
         showReticle = true;
         vehicleOnly = false;
@@ -834,7 +985,13 @@ public class MainActivity extends ComponentActivity {
         selectedCameraId = "";
         wideZoomRatio = 1.0f;
         compatPreview = true;
-        analysisSizeMode = 0;
+        analysisSizeMode = 2;
+        leftRiskLine = 0.45f;
+        rightRiskLine = 0.55f;
+        leftDanger = false;
+        rightDanger = false;
+        dangerStatus = 3;
+        activeTurn = "NONE";
     }
 
     private void applySettings(boolean reinitModel) {
@@ -937,6 +1094,7 @@ public class MainActivity extends ComponentActivity {
             window.setStatusBarColor(Color.BLACK);
             window.setNavigationBarColor(Color.BLACK);
             window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             if (Build.VERSION.SDK_INT >= 28) {
                 WindowManager.LayoutParams lp = window.getAttributes();
                 lp.layoutInDisplayCutoutMode =
@@ -970,6 +1128,7 @@ public class MainActivity extends ComponentActivity {
     protected void onDestroy() {
         super.onDestroy();
         detectorReady = false;
+        if (rearBridge != null) rearBridge.stop();
         if (detector != null) detector.release();
         if (cameraExecutor != null) cameraExecutor.shutdownNow();
     }
