@@ -1,11 +1,16 @@
 package com.jlxc.vehicleinfoncnn;
 
 import android.Manifest;
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
+import android.content.res.ColorStateList;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.Rect;
@@ -16,6 +21,8 @@ import android.util.Size;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
+import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
@@ -203,132 +210,219 @@ public class MainActivity extends ComponentActivity {
     private void showSettingsDialog() {
         final int oldInputSize = inputSize;
         final boolean oldUseGpu = useGpu;
+        Typeface hudTypeface;
+        try {
+            hudTypeface = Typeface.createFromAsset(getAssets(), "fonts/jlxc_hud_vector.ttf");
+        } catch (Throwable t) {
+            hudTypeface = Typeface.create("monospace", Typeface.BOLD);
+        }
 
+        final Dialog dialog = new Dialog(this);
         ScrollView scrollView = new ScrollView(this);
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
+        scrollView.setFillViewport(false);
+        scrollView.setBackgroundColor(Color.TRANSPARENT);
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(18);
-        box.setPadding(pad, pad, pad, pad);
-        scrollView.addView(box, new ScrollView.LayoutParams(
+        panel.setPadding(pad, pad, pad, pad);
+        panel.setBackground(panelBg(0xee020900, 0xff39ff14, 1));
+        scrollView.addView(panel, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        TextView title = new TextView(this);
+        title.setText("FCS / HUD CONFIG");
+        title.setTextColor(0xffa8ff9c);
+        title.setTextSize(20f);
+        title.setTypeface(hudTypeface);
+        title.setLetterSpacing(0.08f);
+        title.setPadding(0, 0, 0, dp(4));
+        panel.addView(title);
+
+        TextView sub = new TextView(this);
+        sub.setText("VISION SYSTEM // LONG PRESS TO CLOSE PANEL // ALL TARGETS BY DEFAULT");
+        sub.setTextColor(0xaa39ff14);
+        sub.setTextSize(10.5f);
+        sub.setTypeface(hudTypeface);
+        sub.setLetterSpacing(0.05f);
+        sub.setPadding(0, 0, 0, dp(12));
+        panel.addView(sub);
+
         TextView hint = new TextView(this);
-        hint.setText("默认显示 YOLOv8 COCO 全类别。识别框、准星和标签为战术 HUD 风格；底部统计文字已隐藏。设置保存后立即生效。");
-        hint.setTextSize(14f);
-        hint.setTextColor(0xff444444);
-        hint.setPadding(0, 0, 0, dp(12));
-        box.addView(hint);
+        hint.setText("默认显示 YOLOv8 COCO 全类别；画面底部信息栏已移除。建议骁龙810先用 320 输入尺寸、关闭 GPU。保存后立即应用。 ");
+        hint.setTextSize(13.5f);
+        hint.setTextColor(0xff8dff82);
+        hint.setLineSpacing(0, 1.15f);
+        hint.setPadding(0, 0, 0, dp(10));
+        panel.addView(hint);
 
-        SeekControl conf = addSeek(box, "置信度阈值", Math.round(confThreshold * 100f), 5, 90, 1, "%");
-        SeekControl nms = addSeek(box, "NMS重叠过滤", Math.round(nmsThreshold * 100f), 10, 90, 1, "%");
-        SeekControl max = addSeek(box, "最多显示目标", maxResults, 1, 80, 1, "个");
-        SeekControl interval = addSeek(box, "推理间隔", inferIntervalMs, 60, 500, 20, "ms");
+        SeekControl conf = addSeek(panel, "01 // 置信度阈值", Math.round(confThreshold * 100f), 5, 90, 1, "%");
+        SeekControl nms = addSeek(panel, "02 // NMS重叠过滤", Math.round(nmsThreshold * 100f), 10, 90, 1, "%");
+        SeekControl max = addSeek(panel, "03 // 最多显示目标", maxResults, 1, 80, 1, "个");
+        SeekControl interval = addSeek(panel, "04 // 推理间隔", inferIntervalMs, 60, 500, 20, "ms");
 
-        TextView inputTitle = sectionTitle("模型输入尺寸");
-        box.addView(inputTitle);
+        TextView inputTitle = sectionTitle("05 // 模型输入尺寸");
+        panel.addView(inputTitle);
         RadioGroup inputGroup = new RadioGroup(this);
         inputGroup.setOrientation(RadioGroup.HORIZONTAL);
+        inputGroup.setPadding(0, 0, 0, dp(4));
         RadioButton size320 = radio("320 快速");
         RadioButton size416 = radio("416 平衡");
-        RadioButton size640 = radio("640 更准");
+        RadioButton size640 = radio("640 高精度");
         inputGroup.addView(size320);
         inputGroup.addView(size416);
         inputGroup.addView(size640);
         if (inputSize == 640) size640.setChecked(true);
         else if (inputSize == 416) size416.setChecked(true);
         else size320.setChecked(true);
-        box.addView(inputGroup);
+        panel.addView(inputGroup);
 
-        Switch labels = sw("显示目标标签", showLabels);
-        Switch reticle = sw("显示中心锁定准星", showReticle);
-        Switch onlyVehicles = sw("只显示交通工具", vehicleOnly);
-        Switch gpu = sw("尝试使用 GPU / Vulkan", useGpu);
-        box.addView(labels);
-        box.addView(reticle);
-        box.addView(onlyVehicles);
-        box.addView(gpu);
+        Switch labels = sw("06 // 显示目标标签", showLabels);
+        Switch reticle = sw("07 // 显示火控准星", showReticle);
+        Switch onlyVehicles = sw("08 // 只显示交通工具", vehicleOnly);
+        Switch gpu = sw("09 // 尝试 GPU / Vulkan", useGpu);
+        panel.addView(labels);
+        panel.addView(reticle);
+        panel.addView(onlyVehicles);
+        panel.addView(gpu);
 
         TextView gpuHint = new TextView(this);
-        gpuHint.setText("GPU 开关取决于 ncnn 预编译包和手机 Vulkan 支持；如果打开后黑屏或加载失败，长按进入设置关闭即可。");
+        gpuHint.setText("GPU 依赖手机 Vulkan 驱动；如果开启后模型加载失败，关闭该项即可。骁龙810建议 CPU + 320。 ");
         gpuHint.setTextSize(12f);
-        gpuHint.setTextColor(0xff666666);
-        gpuHint.setPadding(0, dp(4), 0, 0);
-        box.addView(gpuHint);
+        gpuHint.setTextColor(0x9939ff14);
+        gpuHint.setPadding(0, dp(5), 0, dp(12));
+        panel.addView(gpuHint);
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("战术识别设置")
-                .setView(scrollView)
-                .setPositiveButton("保存应用", null)
-                .setNegativeButton("取消", null)
-                .setNeutralButton("恢复默认", null)
-                .create();
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        buttons.setGravity(Gravity.END);
+        buttons.setPadding(0, dp(10), 0, 0);
+        Button cancel = tacticalButton("CANCEL", hudTypeface);
+        Button reset = tacticalButton("RESET", hudTypeface);
+        Button apply = tacticalButton("APPLY", hudTypeface);
+        buttons.addView(cancel);
+        buttons.addView(reset);
+        buttons.addView(apply);
+        panel.addView(buttons);
 
-        dialog.setOnShowListener(dlg -> {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-                confThreshold = conf.value() / 100f;
-                nmsThreshold = nms.value() / 100f;
-                maxResults = max.value();
-                inferIntervalMs = interval.value();
-                showLabels = labels.isChecked();
-                showReticle = reticle.isChecked();
-                vehicleOnly = onlyVehicles.isChecked();
-                useGpu = gpu.isChecked();
-                if (size640.isChecked()) inputSize = 640;
-                else if (size416.isChecked()) inputSize = 416;
-                else inputSize = 320;
-                saveSettings();
-                applySettings(inputSize != oldInputSize || useGpu != oldUseGpu);
-                dialog.dismiss();
-            });
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
-                resetSettings();
-                saveSettings();
-                applySettings(inputSize != oldInputSize || useGpu != oldUseGpu);
-                dialog.dismiss();
-                Toast.makeText(this, "已恢复默认设置", Toast.LENGTH_SHORT).show();
-            });
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        reset.setOnClickListener(v -> {
+            resetSettings();
+            saveSettings();
+            applySettings(inputSize != oldInputSize || useGpu != oldUseGpu);
+            dialog.dismiss();
+            Toast.makeText(this, "已恢复默认设置", Toast.LENGTH_SHORT).show();
         });
+        apply.setOnClickListener(v -> {
+            confThreshold = conf.value() / 100f;
+            nmsThreshold = nms.value() / 100f;
+            maxResults = max.value();
+            inferIntervalMs = interval.value();
+            showLabels = labels.isChecked();
+            showReticle = reticle.isChecked();
+            vehicleOnly = onlyVehicles.isChecked();
+            useGpu = gpu.isChecked();
+            if (size640.isChecked()) inputSize = 640;
+            else if (size416.isChecked()) inputSize = 416;
+            else inputSize = 320;
+            saveSettings();
+            applySettings(inputSize != oldInputSize || useGpu != oldUseGpu);
+            dialog.dismiss();
+        });
+
+        dialog.setContentView(scrollView);
         dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            window.setLayout(Math.round(getResources().getDisplayMetrics().widthPixels * 0.92f),
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    private GradientDrawable panelBg(int color, int strokeColor, int strokeDp) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(color);
+        bg.setCornerRadius(0f);
+        bg.setStroke(dp(strokeDp), strokeColor);
+        return bg;
+    }
+
+    private Button tacticalButton(String text, Typeface typeface) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextColor(0xff39ff14);
+        b.setTextSize(11.5f);
+        b.setTypeface(typeface);
+        b.setLetterSpacing(0.08f);
+        b.setAllCaps(false);
+        b.setPadding(dp(10), 0, dp(10), 0);
+        b.setMinHeight(dp(34));
+        b.setMinimumHeight(dp(34));
+        b.setBackground(panelBg(0x33001600, 0xaa39ff14, 1));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(36));
+        lp.setMargins(dp(7), 0, 0, 0);
+        b.setLayoutParams(lp);
+        return b;
     }
 
     private TextView sectionTitle(String text) {
         TextView t = new TextView(this);
         t.setText(text);
-        t.setTextSize(15f);
-        t.setTextColor(0xff111111);
+        t.setTextSize(14f);
+        t.setTextColor(0xff39ff14);
         t.setGravity(Gravity.START);
-        t.setPadding(0, dp(14), 0, dp(4));
+        t.setPadding(0, dp(12), 0, dp(4));
+        t.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
         return t;
     }
 
     private RadioButton radio(String text) {
         RadioButton r = new RadioButton(this);
         r.setText(text);
-        r.setTextSize(14f);
+        r.setTextSize(13.5f);
+        r.setTextColor(0xffa8ff9c);
+        r.setButtonTintList(tacticalTint());
+        r.setPadding(0, 0, dp(10), 0);
         return r;
     }
 
     private Switch sw(String text, boolean checked) {
         Switch s = new Switch(this);
         s.setText(text);
-        s.setTextSize(15f);
+        s.setTextSize(14f);
+        s.setTextColor(0xffa8ff9c);
         s.setChecked(checked);
         s.setPadding(0, dp(6), 0, dp(6));
+        s.setThumbTintList(tacticalTint());
+        s.setTrackTintList(new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{0x7739ff14, 0x3339ff14}));
         return s;
     }
 
+    private ColorStateList tacticalTint() {
+        return new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{0xff39ff14, 0x8839ff14});
+    }
+
     private SeekControl addSeek(LinearLayout parent, String title, int value, int min, int max, int step, String suffix) {
-        TextView label = sectionTitle(title + "：" + value + suffix);
+        TextView label = sectionTitle(title + " : " + value + suffix);
         parent.addView(label);
         SeekBar bar = new SeekBar(this);
         int progressMax = Math.max(1, (max - min) / step);
         bar.setMax(progressMax);
         int progress = Math.max(0, Math.min(progressMax, (value - min) / step));
         bar.setProgress(progress);
+        bar.setProgressTintList(ColorStateList.valueOf(0xff39ff14));
+        bar.setThumbTintList(ColorStateList.valueOf(0xffa8ff9c));
+        bar.setProgressBackgroundTintList(ColorStateList.valueOf(0x4439ff14));
         SeekControl control = new SeekControl(bar, label, title, min, step, suffix);
         bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                label.setText(title + "：" + control.value() + suffix);
+                label.setText(title + " : " + control.value() + suffix);
             }
             @Override public void onStartTrackingTouch(SeekBar seekBar) { }
             @Override public void onStopTrackingTouch(SeekBar seekBar) { }
