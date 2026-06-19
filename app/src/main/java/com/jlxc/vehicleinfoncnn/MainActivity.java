@@ -14,6 +14,7 @@ import android.content.res.ColorStateList;
 import android.graphics.ImageFormat;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CaptureRequest;
 import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
@@ -40,12 +41,15 @@ import android.widget.Toast;
 import androidx.activity.ComponentActivity;
 import androidx.annotation.NonNull;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.Camera;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop;
+import androidx.camera.camera2.interop.Camera2CameraControl;
+import androidx.camera.camera2.interop.CaptureRequestOptions;
 import androidx.annotation.OptIn;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -75,6 +79,9 @@ public class MainActivity extends ComponentActivity {
     private static final String KEY_VEHICLE_ONLY = "vehicle_only";
     private static final String KEY_GPU = "use_gpu";
     private static final String KEY_CAMERA_ID = "camera_id";
+    private static final String KEY_WIDE_ZOOM = "wide_zoom";
+    private static final String KEY_COMPAT_PREVIEW = "compat_preview";
+    private static final String KEY_ANALYSIS_SIZE = "analysis_size";
 
     private PreviewView previewView;
     private OverlayView overlayView;
@@ -92,6 +99,10 @@ public class MainActivity extends ComponentActivity {
     private volatile boolean vehicleOnly = false;
     private volatile boolean useGpu = false;
     private volatile String selectedCameraId = "";
+    private volatile float wideZoomRatio = 1.0f;
+    private volatile boolean compatPreview = true;
+    private volatile int analysisSizeMode = 0; // 0=640x480, 1=960x540, 2=1280x720, 3=CameraX auto
+    private volatile Camera boundCamera;
     private long lastInferMs = 0L;
     private long lastErrorToastMs = 0L;
 
@@ -130,6 +141,7 @@ public class MainActivity extends ComponentActivity {
 
         previewView = new PreviewView(this);
         previewView.setScaleType(PreviewView.ScaleType.FILL_CENTER);
+        previewView.setImplementationMode(compatPreview ? PreviewView.ImplementationMode.COMPATIBLE : PreviewView.ImplementationMode.PERFORMANCE);
         previewView.setLongClickable(true);
         previewView.setOnLongClickListener(v -> {
             showSettingsDialog();
@@ -159,49 +171,106 @@ public class MainActivity extends ComponentActivity {
         cameraProviderFuture.addListener(() -> {
             try {
                 ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
-
-                Preview preview = new Preview.Builder().build();
-                preview.setSurfaceProvider(previewView.getSurfaceProvider());
-
-                ImageAnalysis analysis = new ImageAnalysis.Builder()
-                        .setTargetResolution(new Size(640, 480))
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build();
-                analysis.setAnalyzer(cameraExecutor, this::analyzeImage);
-
                 cameraProvider.unbindAll();
 
+                if (previewView != null) {
+                    previewView.setImplementationMode(compatPreview ?
+                            PreviewView.ImplementationMode.COMPATIBLE : PreviewView.ImplementationMode.PERFORMANCE);
+                }
+
+                List<CameraSelector> selectors = buildCameraSelectorFallbacks();
+                List<Size> sizes = buildAnalysisSizeFallbacks();
+                Throwable lastError = null;
                 boolean bound = false;
-                String cameraId = selectedCameraId == null ? "" : selectedCameraId.trim();
-                if (!cameraId.isEmpty()) {
-                    try {
-                        cameraProvider.bindToLifecycle(this, buildCameraSelectorById(cameraId), preview, analysis);
-                        bound = true;
-                    } catch (Throwable selectedError) {
-                        selectedCameraId = "";
-                        saveSettings();
+
+                outer:
+                for (CameraSelector selector : selectors) {
+                    for (Size targetSize : sizes) {
+                        Preview preview = new Preview.Builder().build();
+                        preview.setSurfaceProvider(previewView.getSurfaceProvider());
+
+                        ImageAnalysis.Builder analysisBuilder = new ImageAnalysis.Builder()
+                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST);
+                        if (targetSize != null) {
+                            analysisBuilder.setTargetResolution(targetSize);
+                        }
+                        ImageAnalysis analysis = analysisBuilder.build();
+                        analysis.setAnalyzer(cameraExecutor, this::analyzeImage);
+
+                        try {
+                            cameraProvider.unbindAll();
+                            boundCamera = cameraProvider.bindToLifecycle(this, selector, preview, analysis);
+                            bound = true;
+                            applyWideZoomIfNeeded(boundCamera);
+                            break outer;
+                        } catch (Throwable bindError) {
+                            lastError = bindError;
+                            try { cameraProvider.unbindAll(); } catch (Throwable ignored) { }
+                        }
                     }
                 }
 
                 if (!bound) {
-                    try {
-                        cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis);
-                        bound = true;
-                    } catch (Throwable backError) {
-                        cameraProvider.unbindAll();
-                        cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, preview, analysis);
-                        bound = true;
-                    }
+                    selectedCameraId = "";
+                    wideZoomRatio = 1.0f;
+                    saveSettings();
+                    throw lastError == null ? new IllegalStateException("No camera can be bound") : lastError;
                 }
-
-                if (bound) enterImmersiveMode();
+                enterImmersiveMode();
             } catch (Throwable e) {
                 selectedCameraId = "";
+                wideZoomRatio = 1.0f;
                 saveSettings();
                 Toast.makeText(this, "相机启动失败，已回退默认镜头：" + safeMsg(e), Toast.LENGTH_LONG).show();
                 enterImmersiveMode();
             }
         }, ContextCompat.getMainExecutor(this));
+    }
+
+    private List<CameraSelector> buildCameraSelectorFallbacks() {
+        List<CameraSelector> selectors = new ArrayList<>();
+        String cameraId = selectedCameraId == null ? "" : selectedCameraId.trim();
+        if (!cameraId.isEmpty()) {
+            try { selectors.add(buildCameraSelectorById(cameraId)); } catch (Throwable ignored) { }
+        }
+        selectors.add(CameraSelector.DEFAULT_BACK_CAMERA);
+        selectors.add(CameraSelector.DEFAULT_FRONT_CAMERA);
+        return selectors;
+    }
+
+    private List<Size> buildAnalysisSizeFallbacks() {
+        List<Size> sizes = new ArrayList<>();
+        if (analysisSizeMode == 3) {
+            sizes.add(null);
+            sizes.add(new Size(640, 480));
+            return sizes;
+        }
+        if (analysisSizeMode == 2) sizes.add(new Size(1280, 720));
+        else if (analysisSizeMode == 1) sizes.add(new Size(960, 540));
+        else sizes.add(new Size(640, 480));
+        sizes.add(new Size(640, 480));
+        sizes.add(null);
+        return sizes;
+    }
+
+    @OptIn(markerClass = ExperimentalCamera2Interop.class)
+    private void applyWideZoomIfNeeded(Camera camera) {
+        if (camera == null) return;
+        final float z = wideZoomRatio <= 0f ? 1.0f : wideZoomRatio;
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                CaptureRequestOptions opts = new CaptureRequestOptions.Builder()
+                        .setCaptureRequestOption(CaptureRequest.CONTROL_ZOOM_RATIO, z)
+                        .build();
+                Camera2CameraControl.from(camera.getCameraControl()).setCaptureRequestOptions(opts);
+            }
+        } catch (Throwable ignored) { }
+
+        try {
+            // CameraX 自己的 ZoomControl 更稳，但有些机型不允许小于 1.0。
+            // 小于 1.0 的广角倍率优先交给上面的 Camera2 CONTROL_ZOOM_RATIO。
+            if (z >= 1.0f) camera.getCameraControl().setZoomRatio(z);
+        } catch (Throwable ignored) { }
     }
 
     @OptIn(markerClass = ExperimentalCamera2Interop.class)
@@ -280,6 +349,9 @@ public class MainActivity extends ComponentActivity {
         final int oldInputSize = inputSize;
         final boolean oldUseGpu = useGpu;
         final String oldCameraId = selectedCameraId == null ? "" : selectedCameraId;
+        final float oldWideZoomRatio = wideZoomRatio;
+        final boolean oldCompatPreview = compatPreview;
+        final int oldAnalysisSizeMode = analysisSizeMode;
         Typeface hudTypeface;
         try {
             hudTypeface = Typeface.createFromAsset(getAssets(), "fonts/jlxc_hud_vector.ttf");
@@ -319,7 +391,7 @@ public class MainActivity extends ComponentActivity {
         panel.addView(sub);
 
         TextView hint = new TextView(this);
-        hint.setText("默认显示 YOLOv8 COCO 全类别；启动后强制全屏隐藏状态栏/虚拟键。多摄手机建议在下方选择后置广角/超广角镜头。保存后立即应用。 ");
+        hint.setText("默认显示 YOLOv8 COCO 全类别；启动后强制全屏隐藏状态栏/虚拟键。多摄手机建议优先用 AUTO + 0.6x 广角倍率；如果不生效，再手动尝试 CAM-ID。保存后立即应用。 ");
         hint.setTextSize(13.5f);
         hint.setTextColor(0xff8dff82);
         hint.setLineSpacing(0, 1.15f);
@@ -386,17 +458,63 @@ public class MainActivity extends ComponentActivity {
         cameraHint.setPadding(0, dp(2), 0, dp(8));
         panel.addView(cameraHint);
 
-        Switch labels = sw("07 // 显示目标标签", showLabels);
-        Switch reticle = sw("08 // 显示火控准星", showReticle);
-        Switch onlyVehicles = sw("09 // 只显示交通工具", vehicleOnly);
-        Switch gpu = sw("10 // 尝试 GPU / Vulkan", useGpu);
+        TextView zoomTitle = sectionTitle("07 // 广角倍率 / 逻辑多摄");
+        panel.addView(zoomTitle);
+        RadioGroup zoomGroup = new RadioGroup(this);
+        zoomGroup.setOrientation(RadioGroup.HORIZONTAL);
+        zoomGroup.setPadding(0, 0, 0, dp(4));
+        RadioButton zoomOff = radio("OFF/1.0x"); zoomOff.setTag("1.0");
+        RadioButton zoom06 = radio("0.6x"); zoom06.setTag("0.6");
+        RadioButton zoom07 = radio("0.7x"); zoom07.setTag("0.7");
+        RadioButton zoom08 = radio("0.8x"); zoom08.setTag("0.8");
+        zoomGroup.addView(zoomOff); zoomGroup.addView(zoom06); zoomGroup.addView(zoom07); zoomGroup.addView(zoom08);
+        if (Math.abs(wideZoomRatio - 0.6f) < 0.05f) zoom06.setChecked(true);
+        else if (Math.abs(wideZoomRatio - 0.7f) < 0.05f) zoom07.setChecked(true);
+        else if (Math.abs(wideZoomRatio - 0.8f) < 0.05f) zoom08.setChecked(true);
+        else zoomOff.setChecked(true);
+        panel.addView(zoomGroup);
+        TextView zoomHint = new TextView(this);
+        zoomHint.setText("你的系统相机广角 dump 显示 zoomRatio=0.6。很多新机不是直接暴露广角 Camera-ID，而是在默认后摄上设置 0.6x 触发超广角。Android 11+ 成功率更高。 ");
+        zoomHint.setTextSize(12f);
+        zoomHint.setTextColor(0x9939ff14);
+        zoomHint.setPadding(0, dp(2), 0, dp(8));
+        panel.addView(zoomHint);
+
+        TextView analysisTitle = sectionTitle("08 // 相机分析分辨率");
+        panel.addView(analysisTitle);
+        RadioGroup analysisGroup = new RadioGroup(this);
+        analysisGroup.setOrientation(RadioGroup.VERTICAL);
+        RadioButton ana640 = radio("640x480  // 最稳，低延迟"); ana640.setTag("0");
+        RadioButton ana960 = radio("960x540  // 平衡，适合旗舰"); ana960.setTag("1");
+        RadioButton ana720 = radio("1280x720 // 更清楚，压力更大"); ana720.setTag("2");
+        RadioButton anaAuto = radio("AUTO     // 交给 CameraX 自动选择"); anaAuto.setTag("3");
+        analysisGroup.addView(ana640); analysisGroup.addView(ana960); analysisGroup.addView(ana720); analysisGroup.addView(anaAuto);
+        if (analysisSizeMode == 1) ana960.setChecked(true);
+        else if (analysisSizeMode == 2) ana720.setChecked(true);
+        else if (analysisSizeMode == 3) anaAuto.setChecked(true);
+        else ana640.setChecked(true);
+        panel.addView(analysisGroup);
+
+        Switch compat = sw("09 // 兼容预览模式 SurfaceView/TextureView", compatPreview);
+        panel.addView(compat);
+        TextView compatHint = new TextView(this);
+        compatHint.setText("兼容预览模式更适合老机/魔改系统/部分多摄设备；旗舰机追求低延迟可关闭试试。出现黑屏、预览拉伸、切镜头失败时建议打开。 ");
+        compatHint.setTextSize(12f);
+        compatHint.setTextColor(0x9939ff14);
+        compatHint.setPadding(0, dp(2), 0, dp(8));
+        panel.addView(compatHint);
+
+        Switch labels = sw("10 // 显示目标标签", showLabels);
+        Switch reticle = sw("11 // 显示火控准星", showReticle);
+        Switch onlyVehicles = sw("12 // 只显示交通工具", vehicleOnly);
+        Switch gpu = sw("13 // 尝试 GPU / Vulkan", useGpu);
         panel.addView(labels);
         panel.addView(reticle);
         panel.addView(onlyVehicles);
         panel.addView(gpu);
 
         TextView gpuHint = new TextView(this);
-        gpuHint.setText("GPU 依赖手机 Vulkan 驱动；如果开启后模型加载失败，关闭该项即可。骁龙810建议 CPU + 320。 ");
+        gpuHint.setText("GPU 依赖手机 Vulkan 驱动；如果开启后模型加载失败，关闭该项即可。骁龙810建议 CPU + 320；天玑9500可试 640 + Vulkan + 0.6x。 ");
         gpuHint.setTextSize(12f);
         gpuHint.setTextColor(0x9939ff14);
         gpuHint.setPadding(0, dp(5), 0, dp(12));
@@ -419,7 +537,7 @@ public class MainActivity extends ComponentActivity {
             resetSettings();
             saveSettings();
             applySettings(inputSize != oldInputSize || useGpu != oldUseGpu);
-            if (!oldCameraId.equals(selectedCameraId == null ? "" : selectedCameraId)) startCamera();
+            if (shouldRestartCamera(oldCameraId, oldWideZoomRatio, oldCompatPreview, oldAnalysisSizeMode)) startCamera();
             dialog.dismiss();
             enterImmersiveMode();
             Toast.makeText(this, "已恢复默认设置", Toast.LENGTH_SHORT).show();
@@ -433,6 +551,9 @@ public class MainActivity extends ComponentActivity {
             showReticle = reticle.isChecked();
             vehicleOnly = onlyVehicles.isChecked();
             useGpu = gpu.isChecked();
+            compatPreview = compat.isChecked();
+            wideZoomRatio = readSelectedFloat(zoomGroup, 1.0f);
+            analysisSizeMode = readSelectedInt(analysisGroup, 0);
             String newCameraId = readSelectedCameraId(cameraGroup);
             if (newCameraId != null) selectedCameraId = newCameraId;
             if (size640.isChecked()) inputSize = 640;
@@ -440,9 +561,10 @@ public class MainActivity extends ComponentActivity {
             else inputSize = 320;
             saveSettings();
             applySettings(inputSize != oldInputSize || useGpu != oldUseGpu);
-            if (!oldCameraId.equals(selectedCameraId == null ? "" : selectedCameraId)) {
+            if (shouldRestartCamera(oldCameraId, oldWideZoomRatio, oldCompatPreview, oldAnalysisSizeMode)) {
                 startCamera();
-                Toast.makeText(this, "摄像头已切换：ID " + selectedCameraId, Toast.LENGTH_SHORT).show();
+                String camLabel = (selectedCameraId == null || selectedCameraId.trim().isEmpty()) ? "AUTO" : selectedCameraId;
+                Toast.makeText(this, "相机参数已切换：CAM " + camLabel + " / " + String.format(Locale.US, "%.1fx", wideZoomRatio), Toast.LENGTH_SHORT).show();
             }
             dialog.dismiss();
             enterImmersiveMode();
@@ -466,6 +588,35 @@ public class MainActivity extends ComponentActivity {
         View v = group.findViewById(id);
         Object tag = v == null ? null : v.getTag();
         return tag == null ? null : String.valueOf(tag);
+    }
+
+
+    private float readSelectedFloat(RadioGroup group, float def) {
+        if (group == null) return def;
+        int id = group.getCheckedRadioButtonId();
+        if (id == View.NO_ID) return def;
+        View v = group.findViewById(id);
+        Object tag = v == null ? null : v.getTag();
+        if (tag == null) return def;
+        try { return Float.parseFloat(String.valueOf(tag)); } catch (Throwable ignored) { return def; }
+    }
+
+    private int readSelectedInt(RadioGroup group, int def) {
+        if (group == null) return def;
+        int id = group.getCheckedRadioButtonId();
+        if (id == View.NO_ID) return def;
+        View v = group.findViewById(id);
+        Object tag = v == null ? null : v.getTag();
+        if (tag == null) return def;
+        try { return Integer.parseInt(String.valueOf(tag)); } catch (Throwable ignored) { return def; }
+    }
+
+    private boolean shouldRestartCamera(String oldCameraId, float oldZoom, boolean oldCompat, int oldAnalysisMode) {
+        String newCameraId = selectedCameraId == null ? "" : selectedCameraId;
+        return !oldCameraId.equals(newCameraId)
+                || Math.abs(oldZoom - wideZoomRatio) > 0.01f
+                || oldCompat != compatPreview
+                || oldAnalysisMode != analysisSizeMode;
     }
 
     private static class CameraOption {
@@ -647,6 +798,9 @@ public class MainActivity extends ComponentActivity {
         vehicleOnly = prefs.getBoolean(KEY_VEHICLE_ONLY, false);
         useGpu = prefs.getBoolean(KEY_GPU, false);
         selectedCameraId = prefs.getString(KEY_CAMERA_ID, "");
+        wideZoomRatio = prefs.getFloat(KEY_WIDE_ZOOM, 1.0f);
+        compatPreview = prefs.getBoolean(KEY_COMPAT_PREVIEW, true);
+        analysisSizeMode = prefs.getInt(KEY_ANALYSIS_SIZE, 0);
     }
 
     private void saveSettings() {
@@ -661,6 +815,9 @@ public class MainActivity extends ComponentActivity {
                 .putBoolean(KEY_VEHICLE_ONLY, vehicleOnly)
                 .putBoolean(KEY_GPU, useGpu)
                 .putString(KEY_CAMERA_ID, selectedCameraId == null ? "" : selectedCameraId)
+                .putFloat(KEY_WIDE_ZOOM, wideZoomRatio)
+                .putBoolean(KEY_COMPAT_PREVIEW, compatPreview)
+                .putInt(KEY_ANALYSIS_SIZE, analysisSizeMode)
                 .apply();
     }
 
@@ -675,6 +832,9 @@ public class MainActivity extends ComponentActivity {
         vehicleOnly = false;
         useGpu = false;
         selectedCameraId = "";
+        wideZoomRatio = 1.0f;
+        compatPreview = true;
+        analysisSizeMode = 0;
     }
 
     private void applySettings(boolean reinitModel) {

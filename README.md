@@ -1,180 +1,66 @@
-# VehicleInfoNcnn
+# VehicleInfoNcnn v5 compat
 
-基于 **ncnn + YOLOv8n NCNN** 的安卓端车辆/交通目标识别 Demo。
+基于 ncnn + YOLOv8n NCNN 的安卓实时目标识别 Demo。该版本在 v4.1 safe 的基础上重点增强多设备相机兼容性，继续保留荧光绿战斗机 HUD 风格。
 
-当前版本识别并显示以下 COCO 交通类别：
+## v5 主要更新
 
-- 小汽车 car
-- 摩托车 motorcycle
-- 公交车 bus
-- 卡车 truck
-- 自行车 bicycle
+- 新增多摄兼容策略：CameraX 绑定失败会按 `指定 Camera ID -> 默认后摄 -> 默认前摄` 自动降级。
+- 新增广角倍率模式：`OFF/1.0x`、`0.6x`、`0.7x`、`0.8x`。
+- Android 11+ 会尝试通过 Camera2 `CONTROL_ZOOM_RATIO` 设置 0.6x/0.7x/0.8x，适配“系统相机通过 0.6x 触发超广角”的手机。
+- 新增相机分析分辨率：`640x480`、`960x540`、`1280x720`、`AUTO`。
+- 新增兼容预览模式开关：老机、魔改系统、多摄异常时建议打开。
+- 启动默认仍使用 AUTO 默认后摄，避免隐藏物理镜头导致闪退。
+- 保留设置中的 Camera ID 列表，可手动尝试 CAM-4 这类隐藏/辅助镜头。
+- 保留全屏沉浸式、隐藏状态栏和虚拟键。
+- 保留全类别识别、交通工具过滤、GPU/Vulkan 开关、HUD Overlay。
 
-> 说明：这是一版优先“能跑通、能直接上手机测试”的通用车辆检测底座。模型来自 COCO 预训练 YOLOv8n，所以它不能识别品牌、车型、车牌号码、车身颜色。后续如果你训练了专用车辆属性模型，可以直接替换 assets 中的 `*.param` / `*.bin`，再同步修改后处理类别即可。
+## 针对你这台设备的建议
 
-## 工程结构
+根据你导出的 `media_camera_dump.txt`，系统相机广角状态显示：
 
-```text
-VehicleInfoNcnn/
-├─ app/
-│  ├─ src/main/java/com/jlxc/vehicleinfoncnn/
-│  │  ├─ MainActivity.java          # CameraX 相机预览 + 实时推理
-│  │  ├─ OverlayView.java           # 识别框绘制
-│  │  ├─ VehicleDetector.java       # JNI 声明
-│  │  └─ Detection.java             # 识别结果结构
-│  ├─ src/main/cpp/
-│  │  ├─ native-lib.cpp             # ncnn 加载、YOLOv8 后处理、NMS
-│  │  └─ CMakeLists.txt
-│  └─ src/main/assets/
-│     ├─ yolov8n.ncnn.param         # 小模型参数文件，已放入
-│     └─ yolov8n.ncnn.bin           # 大模型权重，由 scripts/setup_deps.sh 下载后打包进 APK
-├─ scripts/setup_deps.sh            # 下载 ncnn Android 预编译库和模型权重
-└─ .github/workflows/android.yml    # GitHub Actions 自动打包 APK
-```
+- Camera ID: 4
+- zoomRatio: 0.6
+- focalLength: 1.65mm
 
-## 直接在 GitHub Actions 打包
+因此 v5 推荐先这样测试：
 
-1. 新建 GitHub 仓库。
-2. 把本工程所有文件上传到仓库根目录。
-3. 打开仓库的 **Actions**。
-4. 运行 **Android APK** 工作流。
-5. 编译完成后，在 Artifact 里下载 `VehicleInfoNcnn-installable-apks`。
-6. 优先安装 `VehicleInfoNcnn-debug-installable.apk`；也可以安装 `VehicleInfoNcnn-release-debugSigned-installable.apk`。不要安装 `app-release-unsigned.apk`。
+1. 摄像头选择：`AUTO DEFAULT BACK`
+2. 广角倍率：`0.6x`
+3. 相机分析分辨率：`960x540` 或 `1280x720`
+4. 兼容预览模式：先打开
 
-工作流会自动执行：
+如果 AUTO + 0.6x 没有广角效果，再试：
 
-```bash
-bash scripts/setup_deps.sh
-gradle assembleDebug assembleRelease --stacktrace --no-daemon
-```
+1. 摄像头选择：`CAM-4`
+2. 广角倍率：`OFF/1.0x` 或 `0.6x`
+3. 如果黑屏/失败，会自动回退默认后摄
 
-其中 `setup_deps.sh` 会把以下内容下载到工程内：
+## 构建
 
-- `app/src/main/jni/ncnn-20260526-android/`
-- `app/src/main/assets/yolov8n.ncnn.bin`
+上传到 GitHub 后运行 Actions：
 
-最终 APK 会把 `yolov8n.ncnn.param` 和 `yolov8n.ncnn.bin` 都打包到 assets。
-
-## 本地 Android Studio 编译
-
-首次编译前执行：
-
-```bash
-bash scripts/setup_deps.sh
-```
-
-然后用 Android Studio 打开项目，或执行：
-
-```bash
-gradle assembleDebug
-```
-
-## 默认性能配置
-
-- 推理后端：CPU
-- 输入尺寸：320
-- ABI：`armeabi-v7a` + `arm64-v8a`
-- minSdk：23，也就是 Android 6.0+
-- 相机：CameraX 后置摄像头
-
-旧安卓手机建议先保持输入尺寸 320；如果你想提高识别精度，可以把 `MainActivity.java` 里的：
-
-```java
-detectorReady = detector.init(getAssets(), false, 320);
-```
-
-改成：
-
-```java
-detectorReady = detector.init(getAssets(), false, 640);
-```
-
-但 640 在老手机上会明显降低帧率。
-
-## 识别结果说明
-
-底部信息栏会显示：
-
-- 单帧推理耗时
-- 当前识别到的交通目标数量
-- 不同类别数量统计
-- 前 3 个最大目标的类别、置信度、框尺寸、占画面比例
-
-画面上会绘制识别框和类别标签。
-
-## 模型来源
-
-- ncnn：Tencent/ncnn `20260526` Android 预编译包
-- 模型：nihui/ncnn-android-yolov8 中的 `yolov8n.ncnn.param` / `yolov8n.ncnn.bin`
-
-## 后续可扩展方向
-
-1. **车牌识别**：增加车牌检测 + OCR 两阶段模型。
-2. **车型/品牌识别**：替换为专门训练的车辆属性分类模型。
-3. **车身颜色识别**：在检测框区域内加入颜色聚类或训练颜色分类器。
-4. **车机录屏/USB 摄像头输入**：把 CameraX 输入替换成录屏帧或 UVC 摄像头帧。
-5. **悬浮窗识别框**：如果用于车机倒车画面，可以把 OverlayView 改成系统悬浮窗。
-
-
-## 安装失败排查
-
-如果你看到：
-
-```text
-ERROR: "adb install" returned with value 1
-Failed to install ... app-release-unsigned.apk
-```
-
-原因通常是你安装了未签名的 release 包。Android 必须安装已签名 APK。
-
-这版工作流会产出两个可安装文件：
-
-```text
-VehicleInfoNcnn-debug-installable.apk
-VehicleInfoNcnn-release-debugSigned-installable.apk
-```
-
-推荐命令：
+- Workflow: `Android APK`
+- 下载 artifact: `VehicleInfoNcnn-installable-apks`
+- 优先安装：`VehicleInfoNcnn-debug-installable.apk`
 
 ```bat
 adb install -r VehicleInfoNcnn-debug-installable.apk
 ```
 
-如果你之前装过旧版本但签名不同，先卸载旧包：
+签名冲突：
 
 ```bat
 adb uninstall com.jlxc.vehicleinfoncnn
 adb install -r VehicleInfoNcnn-debug-installable.apk
 ```
 
-如果仍然失败，请用下面命令拿到真正失败原因：
+## 日志
 
-```bat
-adb install -r -d VehicleInfoNcnn-debug-installable.apk
-```
-
-常见原因：
-
-- `INSTALL_FAILED_UPDATE_INCOMPATIBLE`：旧版本签名不同，先 `adb uninstall com.jlxc.vehicleinfoncnn`。
-- `INSTALL_FAILED_NO_MATCHING_ABIS`：手机 CPU 架构不匹配；本工程默认支持 `armeabi-v7a` 和 `arm64-v8a`。
-- `INSTALL_FAILED_OLDER_SDK`：系统版本低于 Android 6.0；本工程 `minSdk 23`。
-
-
-## v4.1 闪退修复说明
-
-如果 v4 打开即闪退，优先使用本版。本版把新增的多摄选择逻辑改成了保守模式：
-
-- 启动默认先使用 CameraX 默认后置镜头，不再强行自动选择焦距最小的 Camera-ID。
-- 设置页新增 `AUTO DEFAULT BACK`，这是最稳的系统默认后摄。
-- 手动选择某个 CAM-ID 后，如果该镜头不能被 CameraX 绑定，会自动回退 AUTO，不再因为多摄 ID 异常闪退。
-- 沉浸式全屏改为兼容写法，避免 Android 6/7 老设备因新版 WindowInsets API 出现兼容问题。
-
-如果本版仍然闪退，请连接电脑后执行：
+如果某个相机模式黑屏或崩溃，导出：
 
 ```bat
 adb logcat -c
 adb shell am start -n com.jlxc.vehicleinfoncnn/.MainActivity
-adb logcat -d -v time > crash_log.txt
+adb logcat -d -v threadtime > vehicle_ncnn_v5_log.txt
+adb shell dumpsys media.camera > media_camera_dump.txt
 ```
-
-把 `crash_log.txt` 发出来即可继续定位。
