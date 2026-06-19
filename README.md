@@ -1,67 +1,25 @@
-# VehicleInfoNcnn Green HUD v4
+# VehicleInfoNcnn
 
-基于 **ncnn + YOLOv8n NCNN + CameraX** 的安卓端实时识别 Demo。
+基于 **ncnn + YOLOv8n NCNN** 的安卓端车辆/交通目标识别 Demo。
 
-这一版是 **荧光绿战斗机 HUD 风 v4**，重点更新：
+当前版本识别并显示以下 COCO 交通类别：
 
-- 启动后强制全屏运行，隐藏状态栏和虚拟键。
-- 长按屏幕打开战术风设置面板。
-- 设置中加入 **摄像头选择**，适配多摄手机，可手动切换主摄/超广角/长焦/前摄。
-- 摄像头选择会保存，下次打开自动沿用。
-- 默认显示 YOLOv8n / COCO 能识别的全部类别。
-- 仍保留“只显示交通工具”开关。
-- 继续使用黑底 + 荧光绿 + 火控锁定框 + 中心准星 + 扫描线 HUD 风格。
+- 小汽车 car
+- 摩托车 motorcycle
+- 公交车 bus
+- 卡车 truck
+- 自行车 bicycle
 
-> 说明：YOLOv8n COCO 预训练模型可以识别通用物体类别，但不能识别车辆品牌、具体车型、车牌号码、车身颜色。后续如果你训练了专用车辆属性模型，可以替换 assets 中的模型文件，并同步修改 native 后处理类别。
-
-## 新增功能说明
-
-### 1. 沉浸式全屏
-
-`MainActivity` 会在以下时机重新隐藏系统栏：
-
-- `onCreate`
-- `onResume`
-- `onWindowFocusChanged`
-- 设置面板关闭后
-- 相机重新绑定后
-
-这样从设置面板返回后，状态栏和底部虚拟键也会尽量保持隐藏。
-
-### 2. 多摄像头选择
-
-设置路径：
-
-```text
-长按屏幕 → FCS / HUD CONFIG → 06 // 摄像头选择
-```
-
-列表会读取 Camera2 的摄像头 ID、前后置和焦距，例如：
-
-```text
-CAM-0  BACK   FOCAL 5.50mm  // 后置
-CAM-1  FRONT  FOCAL 2.70mm
-CAM-2  BACK   FOCAL 1.95mm  // 可能是超广角
-```
-
-一般来说：
-
-- 焦距数字越小，视角通常越广。
-- `BACK` 是后置摄像头。
-- `FRONT` 是前置摄像头。
-- 很多手机 `CAM-0` 是主摄，其他 ID 可能是超广角、长焦或前摄。
-- 多摄 Android 机型厂商差异很大，所以建议你逐个切换测试画面视角。
-
-保存设置后会立即重新绑定相机。
+> 说明：这是一版优先“能跑通、能直接上手机测试”的通用车辆检测底座。模型来自 COCO 预训练 YOLOv8n，所以它不能识别品牌、车型、车牌号码、车身颜色。后续如果你训练了专用车辆属性模型，可以直接替换 assets 中的 `*.param` / `*.bin`，再同步修改后处理类别即可。
 
 ## 工程结构
 
 ```text
-VehicleInfoNcnn_green_hud_v4/
+VehicleInfoNcnn/
 ├─ app/
 │  ├─ src/main/java/com/jlxc/vehicleinfoncnn/
-│  │  ├─ MainActivity.java          # CameraX 相机预览、全屏、设置、多摄切换
-│  │  ├─ OverlayView.java           # 荧光绿战斗机 HUD 识别框
+│  │  ├─ MainActivity.java          # CameraX 相机预览 + 实时推理
+│  │  ├─ OverlayView.java           # 识别框绘制
 │  │  ├─ VehicleDetector.java       # JNI 声明
 │  │  └─ Detection.java             # 识别结果结构
 │  ├─ src/main/cpp/
@@ -69,42 +27,46 @@ VehicleInfoNcnn_green_hud_v4/
 │  │  └─ CMakeLists.txt
 │  └─ src/main/assets/
 │     ├─ yolov8n.ncnn.param         # 小模型参数文件，已放入
-│     ├─ yolov8n.ncnn.bin           # 大模型权重，由 scripts/setup_deps.sh 下载后打包进 APK
-│     └─ fonts/jlxc_hud_vector.ttf  # 内置 HUD 字体
+│     └─ yolov8n.ncnn.bin           # 大模型权重，由 scripts/setup_deps.sh 下载后打包进 APK
 ├─ scripts/setup_deps.sh            # 下载 ncnn Android 预编译库和模型权重
 └─ .github/workflows/android.yml    # GitHub Actions 自动打包 APK
 ```
 
-## GitHub Actions 打包
+## 直接在 GitHub Actions 打包
 
 1. 新建 GitHub 仓库。
 2. 把本工程所有文件上传到仓库根目录。
 3. 打开仓库的 **Actions**。
 4. 运行 **Android APK** 工作流。
-5. 编译完成后，在 Artifact 里下载：
+5. 编译完成后，在 Artifact 里下载 `VehicleInfoNcnn-installable-apks`。
+6. 优先安装 `VehicleInfoNcnn-debug-installable.apk`；也可以安装 `VehicleInfoNcnn-release-debugSigned-installable.apk`。不要安装 `app-release-unsigned.apk`。
 
-```text
-VehicleInfoNcnn-installable-apks
+工作流会自动执行：
+
+```bash
+bash scripts/setup_deps.sh
+gradle assembleDebug assembleRelease --stacktrace --no-daemon
 ```
 
-里面会有：
+其中 `setup_deps.sh` 会把以下内容下载到工程内：
 
-```text
-VehicleInfoNcnn-debug-installable.apk
-VehicleInfoNcnn-release-debugSigned-installable.apk
+- `app/src/main/jni/ncnn-20260526-android/`
+- `app/src/main/assets/yolov8n.ncnn.bin`
+
+最终 APK 会把 `yolov8n.ncnn.param` 和 `yolov8n.ncnn.bin` 都打包到 assets。
+
+## 本地 Android Studio 编译
+
+首次编译前执行：
+
+```bash
+bash scripts/setup_deps.sh
 ```
 
-优先安装：
+然后用 Android Studio 打开项目，或执行：
 
-```bat
-adb install -r VehicleInfoNcnn-debug-installable.apk
-```
-
-如果签名冲突：
-
-```bat
-adb uninstall com.jlxc.vehicleinfoncnn
-adb install -r VehicleInfoNcnn-debug-installable.apk
+```bash
+gradle assembleDebug
 ```
 
 ## 默认性能配置
@@ -113,45 +75,106 @@ adb install -r VehicleInfoNcnn-debug-installable.apk
 - 输入尺寸：320
 - ABI：`armeabi-v7a` + `arm64-v8a`
 - minSdk：23，也就是 Android 6.0+
-- 摄像头：自动选择后置中焦距最小的 CameraX 可用镜头；也可以在设置里手动切换
+- 相机：CameraX 后置摄像头
 
-### 老设备建议
+旧安卓手机建议先保持输入尺寸 320；如果你想提高识别精度，可以把 `MainActivity.java` 里的：
 
-骁龙 810 / 845 这类机器建议：
-
-```text
-模型输入尺寸：320
-推理间隔：2 或 3 档位，对应 180ms 以上
-GPU/Vulkan：先关闭
-最多显示目标：10～30
-置信度阈值：0.35～0.45
+```java
+detectorReady = detector.init(getAssets(), false, 320);
 ```
 
-### 新旗舰建议
+改成：
 
-天玑 9500 / 骁龙 8 系旗舰可以尝试：
-
-```text
-模型输入尺寸：640
-推理间隔：60～120ms
-GPU/Vulkan：打开测试
-最多显示目标：80
-置信度阈值：0.25～0.35
+```java
+detectorReady = detector.init(getAssets(), false, 640);
 ```
 
-如果打开 Vulkan 后黑屏、闪退或模型加载失败，就切回 CPU。
+但 640 在老手机上会明显降低帧率。
+
+## 识别结果说明
+
+底部信息栏会显示：
+
+- 单帧推理耗时
+- 当前识别到的交通目标数量
+- 不同类别数量统计
+- 前 3 个最大目标的类别、置信度、框尺寸、占画面比例
+
+画面上会绘制识别框和类别标签。
 
 ## 模型来源
 
 - ncnn：Tencent/ncnn `20260526` Android 预编译包
 - 模型：nihui/ncnn-android-yolov8 中的 `yolov8n.ncnn.param` / `yolov8n.ncnn.bin`
 
+## 后续可扩展方向
+
+1. **车牌识别**：增加车牌检测 + OCR 两阶段模型。
+2. **车型/品牌识别**：替换为专门训练的车辆属性分类模型。
+3. **车身颜色识别**：在检测框区域内加入颜色聚类或训练颜色分类器。
+4. **车机录屏/USB 摄像头输入**：把 CameraX 输入替换成录屏帧或 UVC 摄像头帧。
+5. **悬浮窗识别框**：如果用于车机倒车画面，可以把 OverlayView 改成系统悬浮窗。
+
+
 ## 安装失败排查
 
-不要安装 `app-release-unsigned.apk`。Android 不能安装未签名包。
+如果你看到：
 
-常见失败原因：
+```text
+ERROR: "adb install" returned with value 1
+Failed to install ... app-release-unsigned.apk
+```
 
-- `INSTALL_FAILED_UPDATE_INCOMPATIBLE`：旧版本签名不同，先卸载旧包。
-- `INSTALL_FAILED_NO_MATCHING_ABIS`：CPU 架构不匹配；本工程默认支持 `armeabi-v7a` 和 `arm64-v8a`。
+原因通常是你安装了未签名的 release 包。Android 必须安装已签名 APK。
+
+这版工作流会产出两个可安装文件：
+
+```text
+VehicleInfoNcnn-debug-installable.apk
+VehicleInfoNcnn-release-debugSigned-installable.apk
+```
+
+推荐命令：
+
+```bat
+adb install -r VehicleInfoNcnn-debug-installable.apk
+```
+
+如果你之前装过旧版本但签名不同，先卸载旧包：
+
+```bat
+adb uninstall com.jlxc.vehicleinfoncnn
+adb install -r VehicleInfoNcnn-debug-installable.apk
+```
+
+如果仍然失败，请用下面命令拿到真正失败原因：
+
+```bat
+adb install -r -d VehicleInfoNcnn-debug-installable.apk
+```
+
+常见原因：
+
+- `INSTALL_FAILED_UPDATE_INCOMPATIBLE`：旧版本签名不同，先 `adb uninstall com.jlxc.vehicleinfoncnn`。
+- `INSTALL_FAILED_NO_MATCHING_ABIS`：手机 CPU 架构不匹配；本工程默认支持 `armeabi-v7a` 和 `arm64-v8a`。
 - `INSTALL_FAILED_OLDER_SDK`：系统版本低于 Android 6.0；本工程 `minSdk 23`。
+
+
+## v4.1 闪退修复说明
+
+如果 v4 打开即闪退，优先使用本版。本版把新增的多摄选择逻辑改成了保守模式：
+
+- 启动默认先使用 CameraX 默认后置镜头，不再强行自动选择焦距最小的 Camera-ID。
+- 设置页新增 `AUTO DEFAULT BACK`，这是最稳的系统默认后摄。
+- 手动选择某个 CAM-ID 后，如果该镜头不能被 CameraX 绑定，会自动回退 AUTO，不再因为多摄 ID 异常闪退。
+- 沉浸式全屏改为兼容写法，避免 Android 6/7 老设备因新版 WindowInsets API 出现兼容问题。
+
+如果本版仍然闪退，请连接电脑后执行：
+
+```bat
+adb logcat -c
+adb shell am start -n com.jlxc.vehicleinfoncnn/.MainActivity
+adb logcat -d -v time > crash_log.txt
+```
+
+把 `crash_log.txt` 发出来即可继续定位。

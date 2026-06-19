@@ -22,8 +22,6 @@ import android.os.Bundle;
 import android.os.Build;
 import android.util.Size;
 import android.view.Gravity;
-import android.view.WindowInsets;
-import android.view.WindowInsetsController;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -42,15 +40,13 @@ import android.widget.Toast;
 import androidx.activity.ComponentActivity;
 import androidx.annotation.NonNull;
 import androidx.camera.core.CameraSelector;
-import androidx.camera.core.CameraInfo;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
-import androidx.camera.camera2.interop.Camera2CameraInfo;
+import androidx.camera.view.PreviewView;
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop;
 import androidx.annotation.OptIn;
-import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
@@ -60,6 +56,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import android.view.WindowManager;
 import java.util.Locale;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -157,17 +154,11 @@ public class MainActivity extends ComponentActivity {
         Toast.makeText(this, "长按屏幕打开识别设置", Toast.LENGTH_SHORT).show();
     }
 
-    @OptIn(markerClass = ExperimentalCamera2Interop.class)
     private void startCamera() {
         ListenableFuture<ProcessCameraProvider> cameraProviderFuture = ProcessCameraProvider.getInstance(this);
         cameraProviderFuture.addListener(() -> {
             try {
                 ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
-                if (selectedCameraId == null || selectedCameraId.trim().isEmpty() ||
-                        !cameraIdExists(cameraProvider, selectedCameraId)) {
-                    selectedCameraId = pickDefaultBackCameraId(cameraProvider);
-                    saveSettings();
-                }
 
                 Preview preview = new Preview.Builder().build();
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
@@ -176,69 +167,64 @@ public class MainActivity extends ComponentActivity {
                         .setTargetResolution(new Size(640, 480))
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
-
                 analysis.setAnalyzer(cameraExecutor, this::analyzeImage);
 
-                CameraSelector selector = buildCameraSelector(selectedCameraId);
                 cameraProvider.unbindAll();
-                cameraProvider.bindToLifecycle(this, selector, preview, analysis);
+
+                boolean bound = false;
+                String cameraId = selectedCameraId == null ? "" : selectedCameraId.trim();
+                if (!cameraId.isEmpty()) {
+                    try {
+                        cameraProvider.bindToLifecycle(this, buildCameraSelectorById(cameraId), preview, analysis);
+                        bound = true;
+                    } catch (Throwable selectedError) {
+                        selectedCameraId = "";
+                        saveSettings();
+                    }
+                }
+
+                if (!bound) {
+                    try {
+                        cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis);
+                        bound = true;
+                    } catch (Throwable backError) {
+                        cameraProvider.unbindAll();
+                        cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, preview, analysis);
+                        bound = true;
+                    }
+                }
+
+                if (bound) enterImmersiveMode();
+            } catch (Throwable e) {
+                selectedCameraId = "";
+                saveSettings();
+                Toast.makeText(this, "相机启动失败，已回退默认镜头：" + safeMsg(e), Toast.LENGTH_LONG).show();
                 enterImmersiveMode();
-            } catch (Exception e) {
-                Toast.makeText(this, "相机启动失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
             }
         }, ContextCompat.getMainExecutor(this));
     }
 
     @OptIn(markerClass = ExperimentalCamera2Interop.class)
-    private CameraSelector buildCameraSelector(String cameraId) {
+    private CameraSelector buildCameraSelectorById(String cameraId) {
         if (cameraId == null || cameraId.trim().isEmpty()) return CameraSelector.DEFAULT_BACK_CAMERA;
+        final String targetId = cameraId.trim();
         return new CameraSelector.Builder().addCameraFilter(cameraInfos -> {
-            List<CameraInfo> out = new ArrayList<>();
-            for (CameraInfo info : cameraInfos) {
+            List<androidx.camera.core.CameraInfo> out = new ArrayList<>();
+            for (androidx.camera.core.CameraInfo info : cameraInfos) {
                 try {
-                    String id = Camera2CameraInfo.from(info).getCameraId();
-                    if (cameraId.equals(id)) out.add(info);
+                    String id = androidx.camera.camera2.interop.Camera2CameraInfo.from(info).getCameraId();
+                    if (targetId.equals(id)) out.add(info);
                 } catch (Throwable ignored) { }
             }
-            return out.isEmpty() ? cameraInfos : out;
+            return out;
         }).build();
     }
 
-    @OptIn(markerClass = ExperimentalCamera2Interop.class)
-    private boolean cameraIdExists(ProcessCameraProvider provider, String cameraId) {
-        if (cameraId == null || cameraId.trim().isEmpty()) return false;
-        for (CameraInfo info : provider.getAvailableCameraInfos()) {
-            try {
-                if (cameraId.equals(Camera2CameraInfo.from(info).getCameraId())) return true;
-            } catch (Throwable ignored) { }
-        }
-        return false;
-    }
-
-    @OptIn(markerClass = ExperimentalCamera2Interop.class)
-    private String pickDefaultBackCameraId(ProcessCameraProvider provider) {
-        String firstBack = "";
-        float minBackFocal = Float.MAX_VALUE;
-        String widestBack = "";
-        for (CameraInfo info : provider.getAvailableCameraInfos()) {
-            try {
-                Camera2CameraInfo c2 = Camera2CameraInfo.from(info);
-                String id = c2.getCameraId();
-                Integer facing = c2.getCameraCharacteristic(CameraCharacteristics.LENS_FACING);
-                if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
-                    if (firstBack.isEmpty()) firstBack = id;
-                    float[] focals = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
-                    float minFocal = minFocalLength(focals);
-                    if (minFocal > 0f && minFocal < minBackFocal) {
-                        minBackFocal = minFocal;
-                        widestBack = id;
-                    }
-                }
-            } catch (Throwable ignored) { }
-        }
-        if (!widestBack.isEmpty()) return widestBack;
-        if (!firstBack.isEmpty()) return firstBack;
-        return "";
+    private String safeMsg(Throwable t) {
+        if (t == null) return "unknown";
+        String m = t.getMessage();
+        if (m == null || m.trim().isEmpty()) return t.getClass().getSimpleName();
+        return m;
     }
 
     private float minFocalLength(float[] focals) {
@@ -367,14 +353,21 @@ public class MainActivity extends ComponentActivity {
         cameraGroup.setOrientation(RadioGroup.VERTICAL);
         cameraGroup.setPadding(0, 0, 0, dp(4));
         List<CameraOption> cameraOptions = loadCameraOptions();
+        RadioButton autoCam = radio("AUTO  DEFAULT BACK  // 系统默认后置，最稳");
+        autoCam.setTag("");
+        cameraGroup.addView(autoCam);
+        boolean checkedAny = false;
+        if (selectedCameraId == null || selectedCameraId.trim().isEmpty()) {
+            autoCam.setChecked(true);
+            checkedAny = true;
+        }
         if (cameraOptions.isEmpty()) {
             TextView noCam = new TextView(this);
-            noCam.setText("未读取到 Camera2 摄像头列表；将使用系统默认后置镜头。");
+            noCam.setText("未读取到 Camera2 摄像头列表；仍可使用 AUTO 默认后置镜头。");
             noCam.setTextSize(12.5f);
             noCam.setTextColor(0x9939ff14);
             cameraGroup.addView(noCam);
         } else {
-            boolean checkedAny = false;
             for (CameraOption option : cameraOptions) {
                 RadioButton rb = radio(option.title);
                 rb.setTag(option.cameraId);
@@ -384,13 +377,10 @@ public class MainActivity extends ComponentActivity {
                     checkedAny = true;
                 }
             }
-            if (!checkedAny && cameraGroup.getChildCount() > 0 && cameraGroup.getChildAt(0) instanceof RadioButton) {
-                ((RadioButton) cameraGroup.getChildAt(0)).setChecked(true);
-            }
         }
         panel.addView(cameraGroup);
         TextView cameraHint = new TextView(this);
-        cameraHint.setText("提示：焦距数字越小通常越广。很多手机的 0 是主摄广角，其他 ID 可能是超广角/长焦/前摄，建议逐个测试画面视角。");
+        cameraHint.setText("提示：AUTO 最稳；焦距数字越小通常越广。部分厂商会隐藏物理超广角，某些 CAM-ID 不能被 CameraX 直接绑定，失败时会自动回退 AUTO。");
         cameraHint.setTextSize(12f);
         cameraHint.setTextColor(0x9939ff14);
         cameraHint.setPadding(0, dp(2), 0, dp(8));
@@ -781,23 +771,18 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void enterImmersiveMode() {
-        Window window = getWindow();
-        if (window == null) return;
-        window.setStatusBarColor(Color.BLACK);
-        window.setNavigationBarColor(Color.BLACK);
-        if (Build.VERSION.SDK_INT >= 28) {
-            window.getAttributes().layoutInDisplayCutoutMode =
-                    android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        }
-        if (Build.VERSION.SDK_INT >= 30) {
-            window.setDecorFitsSystemWindows(false);
-            WindowInsetsController controller = window.getInsetsController();
-            if (controller != null) {
-                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
-                controller.setSystemBarsBehavior(
-                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        try {
+            Window window = getWindow();
+            if (window == null) return;
+            window.setStatusBarColor(Color.BLACK);
+            window.setNavigationBarColor(Color.BLACK);
+            window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            if (Build.VERSION.SDK_INT >= 28) {
+                WindowManager.LayoutParams lp = window.getAttributes();
+                lp.layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                window.setAttributes(lp);
             }
-        } else {
             View decor = window.getDecorView();
             decor.setSystemUiVisibility(
                     View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -806,7 +791,7 @@ public class MainActivity extends ComponentActivity {
                             | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                             | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                             | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
-        }
+        } catch (Throwable ignored) { }
     }
 
     @Override
