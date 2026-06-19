@@ -12,13 +12,18 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.content.res.ColorStateList;
 import android.graphics.ImageFormat;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraManager;
 import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
 import android.media.Image;
 import android.os.Bundle;
+import android.os.Build;
 import android.util.Size;
 import android.view.Gravity;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -27,6 +32,7 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.widget.HorizontalScrollView;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Switch;
@@ -36,10 +42,14 @@ import android.widget.Toast;
 import androidx.activity.ComponentActivity;
 import androidx.annotation.NonNull;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.CameraInfo;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
+import androidx.camera.camera2.interop.Camera2CameraInfo;
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop;
+import androidx.annotation.OptIn;
 import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -49,6 +59,8 @@ import com.google.common.util.concurrent.ListenableFuture;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Locale;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -65,6 +77,7 @@ public class MainActivity extends ComponentActivity {
     private static final String KEY_RETICLE = "show_reticle";
     private static final String KEY_VEHICLE_ONLY = "vehicle_only";
     private static final String KEY_GPU = "use_gpu";
+    private static final String KEY_CAMERA_ID = "camera_id";
 
     private PreviewView previewView;
     private OverlayView overlayView;
@@ -81,12 +94,14 @@ public class MainActivity extends ComponentActivity {
     private volatile boolean showReticle = true;
     private volatile boolean vehicleOnly = false;
     private volatile boolean useGpu = false;
+    private volatile String selectedCameraId = "";
     private long lastInferMs = 0L;
     private long lastErrorToastMs = 0L;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        enterImmersiveMode();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         loadSettings();
         buildUi();
@@ -137,15 +152,23 @@ public class MainActivity extends ComponentActivity {
         root.addView(overlayView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        enterImmersiveMode();
 
         Toast.makeText(this, "长按屏幕打开识别设置", Toast.LENGTH_SHORT).show();
     }
 
+    @OptIn(markerClass = ExperimentalCamera2Interop.class)
     private void startCamera() {
         ListenableFuture<ProcessCameraProvider> cameraProviderFuture = ProcessCameraProvider.getInstance(this);
         cameraProviderFuture.addListener(() -> {
             try {
                 ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
+                if (selectedCameraId == null || selectedCameraId.trim().isEmpty() ||
+                        !cameraIdExists(cameraProvider, selectedCameraId)) {
+                    selectedCameraId = pickDefaultBackCameraId(cameraProvider);
+                    saveSettings();
+                }
+
                 Preview preview = new Preview.Builder().build();
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
@@ -156,13 +179,73 @@ public class MainActivity extends ComponentActivity {
 
                 analysis.setAnalyzer(cameraExecutor, this::analyzeImage);
 
-                CameraSelector selector = CameraSelector.DEFAULT_BACK_CAMERA;
+                CameraSelector selector = buildCameraSelector(selectedCameraId);
                 cameraProvider.unbindAll();
                 cameraProvider.bindToLifecycle(this, selector, preview, analysis);
+                enterImmersiveMode();
             } catch (Exception e) {
                 Toast.makeText(this, "相机启动失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
             }
         }, ContextCompat.getMainExecutor(this));
+    }
+
+    @OptIn(markerClass = ExperimentalCamera2Interop.class)
+    private CameraSelector buildCameraSelector(String cameraId) {
+        if (cameraId == null || cameraId.trim().isEmpty()) return CameraSelector.DEFAULT_BACK_CAMERA;
+        return new CameraSelector.Builder().addCameraFilter(cameraInfos -> {
+            List<CameraInfo> out = new ArrayList<>();
+            for (CameraInfo info : cameraInfos) {
+                try {
+                    String id = Camera2CameraInfo.from(info).getCameraId();
+                    if (cameraId.equals(id)) out.add(info);
+                } catch (Throwable ignored) { }
+            }
+            return out.isEmpty() ? cameraInfos : out;
+        }).build();
+    }
+
+    @OptIn(markerClass = ExperimentalCamera2Interop.class)
+    private boolean cameraIdExists(ProcessCameraProvider provider, String cameraId) {
+        if (cameraId == null || cameraId.trim().isEmpty()) return false;
+        for (CameraInfo info : provider.getAvailableCameraInfos()) {
+            try {
+                if (cameraId.equals(Camera2CameraInfo.from(info).getCameraId())) return true;
+            } catch (Throwable ignored) { }
+        }
+        return false;
+    }
+
+    @OptIn(markerClass = ExperimentalCamera2Interop.class)
+    private String pickDefaultBackCameraId(ProcessCameraProvider provider) {
+        String firstBack = "";
+        float minBackFocal = Float.MAX_VALUE;
+        String widestBack = "";
+        for (CameraInfo info : provider.getAvailableCameraInfos()) {
+            try {
+                Camera2CameraInfo c2 = Camera2CameraInfo.from(info);
+                String id = c2.getCameraId();
+                Integer facing = c2.getCameraCharacteristic(CameraCharacteristics.LENS_FACING);
+                if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
+                    if (firstBack.isEmpty()) firstBack = id;
+                    float[] focals = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
+                    float minFocal = minFocalLength(focals);
+                    if (minFocal > 0f && minFocal < minBackFocal) {
+                        minBackFocal = minFocal;
+                        widestBack = id;
+                    }
+                }
+            } catch (Throwable ignored) { }
+        }
+        if (!widestBack.isEmpty()) return widestBack;
+        if (!firstBack.isEmpty()) return firstBack;
+        return "";
+    }
+
+    private float minFocalLength(float[] focals) {
+        if (focals == null || focals.length == 0) return -1f;
+        float min = Float.MAX_VALUE;
+        for (float f : focals) if (f > 0f && f < min) min = f;
+        return min == Float.MAX_VALUE ? -1f : min;
     }
 
     private void analyzeImage(@NonNull ImageProxy imageProxy) {
@@ -210,6 +293,7 @@ public class MainActivity extends ComponentActivity {
     private void showSettingsDialog() {
         final int oldInputSize = inputSize;
         final boolean oldUseGpu = useGpu;
+        final String oldCameraId = selectedCameraId == null ? "" : selectedCameraId;
         Typeface hudTypeface;
         try {
             hudTypeface = Typeface.createFromAsset(getAssets(), "fonts/jlxc_hud_vector.ttf");
@@ -249,7 +333,7 @@ public class MainActivity extends ComponentActivity {
         panel.addView(sub);
 
         TextView hint = new TextView(this);
-        hint.setText("默认显示 YOLOv8 COCO 全类别；画面底部信息栏已移除。建议骁龙810先用 320 输入尺寸、关闭 GPU。保存后立即应用。 ");
+        hint.setText("默认显示 YOLOv8 COCO 全类别；启动后强制全屏隐藏状态栏/虚拟键。多摄手机建议在下方选择后置广角/超广角镜头。保存后立即应用。 ");
         hint.setTextSize(13.5f);
         hint.setTextColor(0xff8dff82);
         hint.setLineSpacing(0, 1.15f);
@@ -277,10 +361,45 @@ public class MainActivity extends ComponentActivity {
         else size320.setChecked(true);
         panel.addView(inputGroup);
 
-        Switch labels = sw("06 // 显示目标标签", showLabels);
-        Switch reticle = sw("07 // 显示火控准星", showReticle);
-        Switch onlyVehicles = sw("08 // 只显示交通工具", vehicleOnly);
-        Switch gpu = sw("09 // 尝试 GPU / Vulkan", useGpu);
+        TextView cameraTitle = sectionTitle("06 // 摄像头选择");
+        panel.addView(cameraTitle);
+        RadioGroup cameraGroup = new RadioGroup(this);
+        cameraGroup.setOrientation(RadioGroup.VERTICAL);
+        cameraGroup.setPadding(0, 0, 0, dp(4));
+        List<CameraOption> cameraOptions = loadCameraOptions();
+        if (cameraOptions.isEmpty()) {
+            TextView noCam = new TextView(this);
+            noCam.setText("未读取到 Camera2 摄像头列表；将使用系统默认后置镜头。");
+            noCam.setTextSize(12.5f);
+            noCam.setTextColor(0x9939ff14);
+            cameraGroup.addView(noCam);
+        } else {
+            boolean checkedAny = false;
+            for (CameraOption option : cameraOptions) {
+                RadioButton rb = radio(option.title);
+                rb.setTag(option.cameraId);
+                cameraGroup.addView(rb);
+                if (!checkedAny && option.cameraId.equals(selectedCameraId)) {
+                    rb.setChecked(true);
+                    checkedAny = true;
+                }
+            }
+            if (!checkedAny && cameraGroup.getChildCount() > 0 && cameraGroup.getChildAt(0) instanceof RadioButton) {
+                ((RadioButton) cameraGroup.getChildAt(0)).setChecked(true);
+            }
+        }
+        panel.addView(cameraGroup);
+        TextView cameraHint = new TextView(this);
+        cameraHint.setText("提示：焦距数字越小通常越广。很多手机的 0 是主摄广角，其他 ID 可能是超广角/长焦/前摄，建议逐个测试画面视角。");
+        cameraHint.setTextSize(12f);
+        cameraHint.setTextColor(0x9939ff14);
+        cameraHint.setPadding(0, dp(2), 0, dp(8));
+        panel.addView(cameraHint);
+
+        Switch labels = sw("07 // 显示目标标签", showLabels);
+        Switch reticle = sw("08 // 显示火控准星", showReticle);
+        Switch onlyVehicles = sw("09 // 只显示交通工具", vehicleOnly);
+        Switch gpu = sw("10 // 尝试 GPU / Vulkan", useGpu);
         panel.addView(labels);
         panel.addView(reticle);
         panel.addView(onlyVehicles);
@@ -310,7 +429,9 @@ public class MainActivity extends ComponentActivity {
             resetSettings();
             saveSettings();
             applySettings(inputSize != oldInputSize || useGpu != oldUseGpu);
+            if (!oldCameraId.equals(selectedCameraId == null ? "" : selectedCameraId)) startCamera();
             dialog.dismiss();
+            enterImmersiveMode();
             Toast.makeText(this, "已恢复默认设置", Toast.LENGTH_SHORT).show();
         });
         apply.setOnClickListener(v -> {
@@ -322,14 +443,22 @@ public class MainActivity extends ComponentActivity {
             showReticle = reticle.isChecked();
             vehicleOnly = onlyVehicles.isChecked();
             useGpu = gpu.isChecked();
+            String newCameraId = readSelectedCameraId(cameraGroup);
+            if (newCameraId != null) selectedCameraId = newCameraId;
             if (size640.isChecked()) inputSize = 640;
             else if (size416.isChecked()) inputSize = 416;
             else inputSize = 320;
             saveSettings();
             applySettings(inputSize != oldInputSize || useGpu != oldUseGpu);
+            if (!oldCameraId.equals(selectedCameraId == null ? "" : selectedCameraId)) {
+                startCamera();
+                Toast.makeText(this, "摄像头已切换：ID " + selectedCameraId, Toast.LENGTH_SHORT).show();
+            }
             dialog.dismiss();
+            enterImmersiveMode();
         });
 
+        dialog.setOnDismissListener(d -> enterImmersiveMode());
         dialog.setContentView(scrollView);
         dialog.show();
         Window window = dialog.getWindow();
@@ -338,6 +467,71 @@ public class MainActivity extends ComponentActivity {
             window.setLayout(Math.round(getResources().getDisplayMetrics().widthPixels * 0.92f),
                     ViewGroup.LayoutParams.WRAP_CONTENT);
         }
+    }
+
+    private String readSelectedCameraId(RadioGroup group) {
+        if (group == null) return null;
+        int id = group.getCheckedRadioButtonId();
+        if (id == View.NO_ID) return null;
+        View v = group.findViewById(id);
+        Object tag = v == null ? null : v.getTag();
+        return tag == null ? null : String.valueOf(tag);
+    }
+
+    private static class CameraOption {
+        final String cameraId;
+        final String title;
+        CameraOption(String cameraId, String title) {
+            this.cameraId = cameraId;
+            this.title = title;
+        }
+    }
+
+    private List<CameraOption> loadCameraOptions() {
+        List<CameraOption> out = new ArrayList<>();
+        try {
+            CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
+            String[] ids = manager.getCameraIdList();
+            Arrays.sort(ids);
+            for (String id : ids) {
+                try {
+                    CameraCharacteristics c = manager.getCameraCharacteristics(id);
+                    Integer facing = c.get(CameraCharacteristics.LENS_FACING);
+                    float[] focals = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
+                    String facingText = facingToText(facing);
+                    String focalText = focalToText(focals);
+                    String hint = "";
+                    if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
+                        float minFocal = minFocalLength(focals);
+                        if (minFocal > 0f && minFocal <= 2.5f) hint = "  // 可能是超广角";
+                        else hint = "  // 后置";
+                    }
+                    out.add(new CameraOption(id, "CAM-" + id + "  " + facingText + "  " + focalText + hint));
+                } catch (Throwable ignored) {
+                    out.add(new CameraOption(id, "CAM-" + id + "  // 信息读取失败"));
+                }
+            }
+        } catch (Throwable ignored) { }
+        return out;
+    }
+
+    private String facingToText(Integer facing) {
+        if (facing == null) return "UNKNOWN";
+        if (facing == CameraCharacteristics.LENS_FACING_BACK) return "BACK";
+        if (facing == CameraCharacteristics.LENS_FACING_FRONT) return "FRONT";
+        if (Build.VERSION.SDK_INT >= 23 && facing == CameraCharacteristics.LENS_FACING_EXTERNAL) return "EXTERNAL";
+        return "UNKNOWN";
+    }
+
+    private String focalToText(float[] focals) {
+        if (focals == null || focals.length == 0) return "FOCAL ?";
+        StringBuilder sb = new StringBuilder("FOCAL ");
+        for (int i = 0; i < focals.length; i++) {
+            if (i > 0) sb.append('/');
+            sb.append(String.format(Locale.US, "%.2f", focals[i]));
+        }
+        sb.append("mm");
+        return sb.toString();
     }
 
     private GradientDrawable panelBg(int color, int strokeColor, int strokeDp) {
@@ -380,6 +574,7 @@ public class MainActivity extends ComponentActivity {
 
     private RadioButton radio(String text) {
         RadioButton r = new RadioButton(this);
+        r.setId(View.generateViewId());
         r.setText(text);
         r.setTextSize(13.5f);
         r.setTextColor(0xffa8ff9c);
@@ -461,6 +656,7 @@ public class MainActivity extends ComponentActivity {
         showReticle = prefs.getBoolean(KEY_RETICLE, true);
         vehicleOnly = prefs.getBoolean(KEY_VEHICLE_ONLY, false);
         useGpu = prefs.getBoolean(KEY_GPU, false);
+        selectedCameraId = prefs.getString(KEY_CAMERA_ID, "");
     }
 
     private void saveSettings() {
@@ -474,6 +670,7 @@ public class MainActivity extends ComponentActivity {
                 .putBoolean(KEY_RETICLE, showReticle)
                 .putBoolean(KEY_VEHICLE_ONLY, vehicleOnly)
                 .putBoolean(KEY_GPU, useGpu)
+                .putString(KEY_CAMERA_ID, selectedCameraId == null ? "" : selectedCameraId)
                 .apply();
     }
 
@@ -487,6 +684,7 @@ public class MainActivity extends ComponentActivity {
         showReticle = true;
         vehicleOnly = false;
         useGpu = false;
+        selectedCameraId = "";
     }
 
     private void applySettings(boolean reinitModel) {
@@ -580,6 +778,47 @@ public class MainActivity extends ComponentActivity {
         } else {
             Toast.makeText(this, "需要相机权限才能实时识别", Toast.LENGTH_LONG).show();
         }
+    }
+
+    private void enterImmersiveMode() {
+        Window window = getWindow();
+        if (window == null) return;
+        window.setStatusBarColor(Color.BLACK);
+        window.setNavigationBarColor(Color.BLACK);
+        if (Build.VERSION.SDK_INT >= 28) {
+            window.getAttributes().layoutInDisplayCutoutMode =
+                    android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            View decor = window.getDecorView();
+            decor.setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) enterImmersiveMode();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        enterImmersiveMode();
     }
 
     @Override
