@@ -4,7 +4,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="车辆识别 ncnn"
+        android:label="战术识别 ncnn"
         android:theme="@style/AppTheme"
         android:resizeableActivity="true"
         android:usesCleartextTraffic="true">

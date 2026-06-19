@@ -29,25 +29,31 @@ static ncnn::Net g_net;
 static std::mutex g_mutex;
 static bool g_loaded = false;
 static int g_target_size = 320;
+static float g_prob_threshold = 0.25f;
+static float g_nms_threshold = 0.45f;
+static int g_max_results = 40;
 
 static inline float sigmoid(float x) {
     return 1.f / (1.f + std::exp(-x));
 }
 
-static inline bool is_vehicle_label(int label) {
-    // COCO: 1 bicycle, 2 car, 3 motorcycle, 5 bus, 7 truck
-    return label == 1 || label == 2 || label == 3 || label == 5 || label == 7;
-}
-
-static const char* vehicle_label_cn(int label) {
-    switch (label) {
-        case 1: return "自行车";
-        case 2: return "小汽车";
-        case 3: return "摩托车";
-        case 5: return "公交车";
-        case 7: return "卡车";
-        default: return "车辆";
-    }
+static const char* coco_label_name(int label) {
+    static const char* names[] = {
+            "PERSON", "BICYCLE", "CAR", "MOTORCYCLE", "AIRPLANE", "BUS", "TRAIN", "TRUCK",
+            "BOAT", "TRAFFIC LIGHT", "FIRE HYDRANT", "STOP SIGN", "PARKING METER", "BENCH",
+            "BIRD", "CAT", "DOG", "HORSE", "SHEEP", "COW", "ELEPHANT", "BEAR", "ZEBRA",
+            "GIRAFFE", "BACKPACK", "UMBRELLA", "HANDBAG", "TIE", "SUITCASE", "FRISBEE",
+            "SKIS", "SNOWBOARD", "SPORTS BALL", "KITE", "BASEBALL BAT", "BASEBALL GLOVE",
+            "SKATEBOARD", "SURFBOARD", "TENNIS RACKET", "BOTTLE", "WINE GLASS", "CUP",
+            "FORK", "KNIFE", "SPOON", "BOWL", "BANANA", "APPLE", "SANDWICH", "ORANGE",
+            "BROCCOLI", "CARROT", "HOT DOG", "PIZZA", "DONUT", "CAKE", "CHAIR", "COUCH",
+            "POTTED PLANT", "BED", "DINING TABLE", "TOILET", "TV", "LAPTOP", "MOUSE",
+            "REMOTE", "KEYBOARD", "CELL PHONE", "MICROWAVE", "OVEN", "TOASTER", "SINK",
+            "REFRIGERATOR", "BOOK", "CLOCK", "VASE", "SCISSORS", "TEDDY BEAR", "HAIR DRIER",
+            "TOOTHBRUSH"
+    };
+    if (label >= 0 && label < (int)(sizeof(names) / sizeof(names[0]))) return names[label];
+    return "TARGET";
 }
 
 static float intersection_area(const Object& a, const Object& b) {
@@ -120,7 +126,6 @@ static void generate_proposals(const ncnn::Mat& pred, const std::vector<int>& st
                         label = k;
                     }
                 }
-                if (!is_vehicle_label(label)) continue;
                 float score = sigmoid(score_raw);
                 if (score < prob_threshold) continue;
 
@@ -150,8 +155,8 @@ static int detect_rgba(const unsigned char* rgba, int img_w, int img_h, std::vec
 
     const int target_size = g_target_size;
     const int max_stride = 32;
-    const float prob_threshold = 0.25f;
-    const float nms_threshold = 0.45f;
+    const float prob_threshold = g_prob_threshold;
+    const float nms_threshold = g_nms_threshold;
     std::vector<int> strides = {8, 16, 32};
 
     int w = img_w;
@@ -221,8 +226,18 @@ static int detect_rgba(const unsigned char* rgba, int img_w, int img_h, std::vec
     std::sort(objects.begin(), objects.end(), [](const Object& a, const Object& b) {
         return a.w * a.h > b.w * b.h;
     });
-    if (objects.size() > 20) objects.resize(20);
+    if (objects.size() > (size_t)g_max_results) objects.resize((size_t)g_max_results);
     return 0;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_jlxc_vehicleinfoncnn_VehicleDetector_setOptions(JNIEnv* /*env*/, jobject /*thiz*/,
+                                                         jfloat probThreshold, jfloat nmsThreshold, jint maxResults) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_prob_threshold = std::max(0.05f, std::min(0.90f, (float)probThreshold));
+    g_nms_threshold = std::max(0.10f, std::min(0.90f, (float)nmsThreshold));
+    g_max_results = std::max(1, std::min(80, (int)maxResults));
+    LOGI("setOptions prob=%.2f nms=%.2f max=%d", g_prob_threshold, g_nms_threshold, g_max_results);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -285,7 +300,7 @@ Java_com_jlxc_vehicleinfoncnn_VehicleDetector_detect(JNIEnv* env, jobject /*thiz
     for (size_t i = 0; i < objects.size(); i++) {
         const Object& o = objects[i];
         float area_ratio = (o.w * o.h) / std::max(1.f, (float)(info.width * info.height));
-        jstring label = env->NewStringUTF(vehicle_label_cn(o.label));
+        jstring label = env->NewStringUTF(coco_label_name(o.label));
         jobject det = env->NewObject(cls, ctor, (jint)o.label, label,
                                      (jfloat)o.x, (jfloat)o.y, (jfloat)o.w, (jfloat)o.h,
                                      (jfloat)o.prob, (jfloat)area_ratio);

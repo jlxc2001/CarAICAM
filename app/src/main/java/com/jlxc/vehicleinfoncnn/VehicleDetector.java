@@ -9,6 +9,7 @@ public class VehicleDetector {
     }
 
     public native boolean init(AssetManager assetManager, boolean useGpu, int targetSize);
+    public native void setOptions(float probThreshold, float nmsThreshold, int maxResults);
     public native Detection[] detect(Bitmap bitmap);
     public native void release();
 }
